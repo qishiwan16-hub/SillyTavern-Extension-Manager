@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.4.0';
+    const SCRIPT_VERSION = '1.4.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -13,9 +13,9 @@
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), batchUpdating: false, minimized: false, meta: {}, backend: { available: false, error: '', version: '' } };
-    const selfUpdateState = { phase: 'idle', message: '正在检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
-    const backendUpdateState = { phase: 'idle', message: '正在检查后端更新', canUpdate: false, updateSupported: false, version: '', restartRequired: false };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), batchUpdating: false, collapsed: false, meta: {}, backend: { available: false, error: '', version: '' } };
+    const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
+    const backendUpdateState = { phase: 'idle', message: '点击按钮检查后端更新', canUpdate: false, updateSupported: false, version: '', restartRequired: false };
     let extensionApiPromise = null;
 
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
@@ -170,34 +170,22 @@
 
     function beginDetection($popup) {
         $popup.data('em-active-detections', Number($popup.data('em-active-detections') || 0) + 1);
-        if (!state.minimized) return;
-        $popup.find('.em-float').removeClass('complete').attr('title', '正在检测扩展更新').html('<i class="fa-solid fa-arrows-rotate fa-spin"></i>');
     }
 
     function finishDetection($popup) {
         const remaining = Math.max(0, Number($popup.data('em-active-detections') || 0) - 1);
         $popup.data('em-active-detections', remaining);
-        if (remaining > 0 || !state.minimized || !$popup.is(':visible')) return;
-        $popup.find('.em-float').addClass('complete').attr('title', '检测完成，点击返回').html('<i class="fa-solid fa-check"></i>');
-        if (window.toastr) toastr.info('扩展与更新检测已完成');
+        if (remaining === 0 && state.collapsed && $popup.is(':visible') && window.toastr) toastr.info('更新检测已完成');
     }
 
-    function minimizeForDetection($popup) {
-        if (Number($popup.data('em-active-detections') || 0) <= 0) {
-            if (window.toastr) toastr.info('当前没有正在进行的检测');
-            return;
-        }
-        state.minimized = true;
-        $popup.addClass('em-minimized');
-        $popup.find('.em-box').prop('hidden', true);
-        if (!$popup.find('.em-float').length) $popup.append('<button type="button" class="em-float" title="正在检测扩展更新"><i class="fa-solid fa-arrows-rotate fa-spin"></i></button>');
-    }
-
-    function restoreFromFloat($popup) {
-        state.minimized = false;
-        $popup.removeClass('em-minimized');
-        $popup.find('.em-box').prop('hidden', false);
-        $popup.find('.em-float').remove();
+    function togglePanelCollapse($popup) {
+        state.collapsed = !state.collapsed;
+        $popup.toggleClass('em-collapsed', state.collapsed);
+        const $button = $popup.find('.em-minimize');
+        const label = state.collapsed ? '展开面板' : '收起面板';
+        $button.attr({ title: label, 'aria-label': label, 'aria-expanded': String(!state.collapsed) });
+        $button.find('i').toggleClass('fa-window-minimize', !state.collapsed).toggleClass('fa-plus', state.collapsed);
+        if (!state.collapsed) requestAnimationFrame(() => $popup.trigger('focus'));
     }
 
     async function checkAll($popup) {
@@ -212,7 +200,7 @@
             const availableExtensions = state.extensions.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
             state.selectedUpdates = new Set(availableExtensions.map(folderOf));
             const message = availableExtensions.length ? `发现 ${availableExtensions.length} 个扩展可快速更新` : '其他扩展均为最新版本';
-            if (!state.minimized && window.toastr) toastr.info(message);
+            if (!state.collapsed && window.toastr) toastr.info(message);
         } finally {
             state.checking = false;
             renderList($popup);
@@ -606,8 +594,6 @@
             renderBackendState($popup);
             await discover();
             renderList($popup);
-            void checkAll($popup);
-            void checkBackendUpdate($popup);
         } catch (error) {
             $popup.find('#em-list').html(`<div class="em-empty em-error"><i class="fa-solid fa-triangle-exclamation"></i><span>读取失败：${escapeHtml(error.message || error)}</span></div>`);
         }
@@ -649,13 +635,6 @@
                 isolation: isolate;
             }
 
-            #st-extension-manager-overlay.em-minimized {
-                pointer-events: none;
-                background: transparent;
-                backdrop-filter: none;
-                -webkit-backdrop-filter: none;
-            }
-
             #st-extension-manager-overlay > .em-box {
                 position: relative !important;
                 inset: auto !important;
@@ -664,12 +643,12 @@
                 bottom: auto !important;
                 left: auto !important;
                 transform: none !important;
-                width: min(960px, 100%) !important;
-                height: min(820px, calc(100vh - 24px)) !important;
-                height: min(820px, calc(100dvh - 24px)) !important;
+                width: min(550px, 90vw) !important;
+                height: min(760px, 80vh) !important;
+                height: min(760px, 80dvh) !important;
                 min-width: 0;
                 min-height: 0;
-                max-width: 960px !important;
+                max-width: 550px !important;
                 max-height: 100% !important;
                 margin: 0 !important;
                 border: 1px solid rgba(255, 255, 255, .28);
@@ -703,30 +682,9 @@
                 outline-offset: 2px;
             }
 
-            #st-extension-manager-overlay .em-float {
-                position: fixed !important;
-                right: max(18px, env(safe-area-inset-right));
-                bottom: max(24px, env(safe-area-inset-bottom));
-                z-index: 2147483001;
-                width: 50px;
-                height: 50px;
-                padding: 0;
-                border: 1px solid rgba(255, 255, 255, .38);
-                border-radius: 50%;
-                background: var(--em-accent);
-                color: #fff;
-                box-shadow: 0 10px 28px rgba(0, 0, 0, .3);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                pointer-events: auto;
-            }
-            #st-extension-manager-overlay .em-float.complete { background: #278d50; }
-
             #st-extension-manager-overlay .em-header {
-                min-height: 70px;
-                padding: 13px 16px 12px 18px;
+                min-height: 64px;
+                padding: 10px 13px 9px 15px;
                 border-bottom: 1px solid var(--em-line);
                 display: flex;
                 align-items: center;
@@ -1008,11 +966,13 @@
                 border-radius: 6px;
                 background: rgba(0, 0, 0, .025);
                 display: grid;
-                grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) minmax(180px, 2fr) auto;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
                 align-items: end;
                 gap: 8px;
             }
             #st-extension-manager-overlay .em-editor[hidden] { display: none; }
+            #st-extension-manager-overlay .em-editor label:nth-child(3) { grid-column: 1 / -1; }
+            #st-extension-manager-overlay .em-editor .em-save-meta { grid-column: 1 / -1; justify-self: end; }
             #st-extension-manager-overlay .em-editor label,
             #st-extension-manager-overlay .em-install label { min-width: 0; display: flex; flex-direction: column; gap: 5px; font-size: .76em; opacity: .8; }
             #st-extension-manager-overlay .em-editor input,
@@ -1046,9 +1006,9 @@
             #st-extension-manager-overlay .em-install h3 i { color: var(--em-accent); }
             #st-extension-manager-overlay .em-install-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, .45fr); gap: 9px; }
             #st-extension-manager-overlay .em-install > button { min-height: 36px; }
-            #st-extension-manager-overlay .em-update-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; }
+            #st-extension-manager-overlay .em-update-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 10px; }
             #st-extension-manager-overlay .em-update-layout .em-install { max-width: none; margin: 0; }
-            #st-extension-manager-overlay .em-update-layout .em-install:last-child { grid-column: 1 / -1; }
+            #st-extension-manager-overlay .em-update-layout .em-install:last-child { grid-column: auto; }
             #st-extension-manager-overlay .em-update-actions { display: flex; gap: 7px; }
             #st-extension-manager-overlay .em-update-actions > * { min-width: 0; flex: 1 1 0; }
             #st-extension-manager-overlay .em-self-update-status,
@@ -1111,19 +1071,17 @@
 
             @media (max-width: 700px) {
                 #st-extension-manager-overlay {
-                    place-items: end center;
+                    place-items: center;
                     padding: max(6px, env(safe-area-inset-top)) 0 0;
                 }
                 #st-extension-manager-overlay > .em-box {
-                    width: 100% !important;
-                    height: calc(100vh - 6px) !important;
-                    height: calc(100dvh - max(6px, env(safe-area-inset-top))) !important;
-                    max-width: none !important;
-                    max-height: none !important;
-                    border-right: 0;
-                    border-bottom: 0;
-                    border-left: 0;
-                    border-radius: 8px 8px 0 0;
+                    width: min(550px, 90vw) !important;
+                    height: min(760px, 80vh) !important;
+                    height: min(760px, 80dvh) !important;
+                    max-width: 550px !important;
+                    max-height: calc(100vh - 12px) !important;
+                    max-height: calc(100dvh - 12px) !important;
+                    border-radius: 8px;
                 }
                 #st-extension-manager-overlay .em-header { min-height: 62px; padding: 10px 10px 9px 13px; }
                 #st-extension-manager-overlay .em-title { font-size: .98em; }
@@ -1145,6 +1103,8 @@
                 #st-extension-manager-overlay .em-card-actions { gap: 5px; }
                 #st-extension-manager-overlay .em-action { min-height: 34px; padding: 6px 9px; }
                 #st-extension-manager-overlay .em-editor { grid-template-columns: minmax(0, 1fr); }
+                #st-extension-manager-overlay .em-editor label:nth-child(3),
+                #st-extension-manager-overlay .em-editor .em-save-meta { grid-column: auto; justify-self: stretch; }
                 #st-extension-manager-overlay .em-install { padding: 13px; }
                 #st-extension-manager-overlay .em-install-row,
                 #st-extension-manager-overlay .em-update-layout { grid-template-columns: minmax(0, 1fr); }
@@ -1163,11 +1123,36 @@
 
             @media (max-height: 560px) and (min-width: 701px) {
                 #st-extension-manager-overlay { padding: 6px; }
-                #st-extension-manager-overlay > .em-box { height: calc(100vh - 12px) !important; height: calc(100dvh - 12px) !important; }
                 #st-extension-manager-overlay .em-header { min-height: 58px; padding-block: 8px; }
                 #st-extension-manager-overlay .em-toolbar { min-height: 42px; padding-block: 5px; }
                 #st-extension-manager-overlay .em-content { padding: 10px 14px; }
             }
+
+            #st-extension-manager-overlay.em-collapsed {
+                place-items: center;
+                padding: 12px;
+                pointer-events: none;
+                background: transparent;
+                backdrop-filter: none;
+                -webkit-backdrop-filter: none;
+            }
+            #st-extension-manager-overlay.em-collapsed > .em-box {
+                width: min(550px, calc(100vw - 24px)) !important;
+                height: auto !important;
+                min-height: 0 !important;
+                max-width: 550px !important;
+                max-height: none !important;
+                border: 1px solid rgba(255, 255, 255, .28);
+                border-radius: 8px;
+                pointer-events: auto;
+                animation: none;
+            }
+            #st-extension-manager-overlay.em-collapsed .em-header {
+                min-height: 58px;
+                border-bottom: 0;
+            }
+            #st-extension-manager-overlay.em-collapsed .em-toolbar,
+            #st-extension-manager-overlay.em-collapsed .em-content { display: none !important; }
 
             @media (prefers-reduced-motion: reduce) {
                 #st-extension-manager-overlay > .em-box,
@@ -1179,15 +1164,14 @@
     async function showPopup() {
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = false;
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="检测时收纳" aria-label="检测时收纳"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-link"></i> 添加扩展</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="install"><form class="em-install"><h3><i class="fa-solid fa-link"></i> 从 Git 仓库添加扩展</h3><label>仓库链接<input name="url" type="url" placeholder="https://github.com/作者/仓库" required></label><div class="em-install-row"><label>分支或标签<input name="branch" placeholder="默认分支"></label><label>安装范围<select name="scope"><option value="local">仅当前用户</option><option value="global">全局安装</option></select></label></div><button type="submit" class="em-action primary"><i class="fa-solid fa-download"></i> 安装扩展</button><div class="em-install-status"></div></form></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">正在检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 扩展管理器后端</h3><p class="em-backend-update-status">正在检查后端更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端更新</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">等待检测结果</div></div></div></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-link"></i> 添加扩展</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="install"><form class="em-install"><h3><i class="fa-solid fa-link"></i> 从 Git 仓库添加扩展</h3><label>仓库链接<input name="url" type="url" placeholder="https://github.com/作者/仓库" required></label><div class="em-install-row"><label>分支或标签<input name="branch" placeholder="默认分支"></label><label>安装范围<select name="scope"><option value="local">仅当前用户</option><option value="global">全局安装</option></select></label></div><button type="submit" class="em-action primary"><i class="fa-solid fa-download"></i> 安装扩展</button><div class="em-install-status"></div></form></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">点击按钮检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 扩展管理器后端</h3><p class="em-backend-update-status">点击按钮检查后端更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端更新</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">点击“重新检测全部扩展”开始检查</div></div></div></div></section></main></div></div>`);
         $('body').append($popup);
         const panelAbortController = new AbortController();
-        const close = () => { panelAbortController.abort(); state.minimized = false; $popup.fadeOut(180, () => $popup.remove()); };
+        const close = () => { panelAbortController.abort(); state.collapsed = false; $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
         $popup.on('keydown', e => { if (e.key === 'Escape') close(); });
         requestAnimationFrame(() => $popup.trigger('focus'));
-        $popup.on('click', '.em-minimize', () => minimizeForDetection($popup));
-        $popup.on('click', '.em-float', () => restoreFromFloat($popup));
+        $popup.on('click', '.em-minimize', () => togglePanelCollapse($popup));
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); $popup.find('.em-box').toggleClass('em-dark', darkNow); $(this).find('i').toggleClass('fa-moon', !darkNow).toggleClass('fa-sun', darkNow); });
         $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); });
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
@@ -1230,7 +1214,6 @@
             }
         });
         await loadExtensions($popup);
-        void checkSelfUpdate($popup, panelAbortController.signal);
     }
 
     function injectMenu() {
