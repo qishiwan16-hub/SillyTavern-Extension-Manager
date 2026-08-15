@@ -9,8 +9,11 @@
 - 支持当前用户或全局范围的 Git 仓库安装。
 - 使用酒馆原生版本与更新接口检查更新。
 - 扩展管理器本体支持自动检测、手动检查和更新后热加载。
-- 更新后尝试带缓存参数热加载；无法热加载时提示刷新页面。
-- 中文名和备注按酒馆账号保存到后端 JSON 文件。
+- 后端支持面板检测和安全的 `git pull --ff-only` 更新，完成后只提示手动重启 Termux。
+- 检测期间可以收纳为不遮挡正文的临时悬浮球。
+- 可勾选需要更新的扩展并按顺序快速热更新，不刷新浏览器。
+- 启用或禁用扩展调用酒馆原生接口，并按酒馆要求刷新页面。
+- 中文名、备注和自定义分类按酒馆账号保存到后端 JSON 文件。
 - 后端使用原子写入、`.bak` 备份和损坏回退读取。
 
 ## 前端安装
@@ -38,13 +41,16 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager.git
 https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend
 ```
 
-先停止 SillyTavern，然后在 SillyTavern 根目录执行：
+先停止 SillyTavern，然后打开 Termux。默认安装在 `~/SillyTavern` 时执行：
 
 ```bash
-cd plugins
+pkg install git -y
+cd ~/SillyTavern/plugins
 git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager
 cd ..
 ```
+
+如果 SillyTavern 不在默认目录，把 `~/SillyTavern` 换成实际安装路径。
 
 打开 SillyTavern 的 `config.yaml`，确保启用服务端插件：
 
@@ -89,14 +95,16 @@ cd data/<账户名>/extensions/third-party/SillyTavern-Extension-Manager
 git pull
 ```
 
-后端更新需要先停止酒馆：
+后端可以在扩展管理器的“更新检查”页面检测并更新。面板更新固定执行后端安装目录的 `git pull --ff-only`；更新完成后会提示手动重启 Termux 中的 SillyTavern，但不会自动停止或重启任何进程。
+
+也可以先停止酒馆再手动更新：
 
 ```bash
 cd plugins/extension-manager
-git pull
+git pull --ff-only
 ```
 
-拉取完成后重新启动 SillyTavern。后端更新不会删除 `data/` 中的资料。
+拉取完成后重新启动 SillyTavern。后端更新不会删除 `data/` 中的资料。第一次从旧版后端升级到带自动更新接口的版本时，需要手动执行一次上述命令。
 
 ## 仓库结构
 

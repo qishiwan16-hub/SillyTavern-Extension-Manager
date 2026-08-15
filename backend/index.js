@@ -4,6 +4,11 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+
+const execFileAsync = promisify(execFile);
+const packageInfo = require('./package.json');
 
 const info = {
     id: 'extension-manager',
@@ -18,7 +23,10 @@ const MAX_META_BYTES = 2 * 1024 * 1024;
 const MAX_EXTENSIONS = 2000;
 const MAX_NAME_LENGTH = 160;
 const MAX_NOTE_LENGTH = 2000;
+const MAX_CATEGORY_LENGTH = 80;
+const GIT_TIMEOUT_MS = 120000;
 let writeQueue = Promise.resolve();
+let updateQueue = Promise.resolve();
 
 function isObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -52,7 +60,8 @@ function normalizeData(value) {
         if (!/^[^/\\\0]{1,180}$/.test(safeFolder) || !isObject(item)) return;
         const name = String(item.name || '').trim().slice(0, MAX_NAME_LENGTH);
         const note = String(item.note || '').trim().slice(0, MAX_NOTE_LENGTH);
-        if (name || note) extensions[safeFolder] = { name, note };
+        const category = String(item.category || '').trim().slice(0, MAX_CATEGORY_LENGTH);
+        if (name || note || category) extensions[safeFolder] = { name, note, category };
     });
     return {
         schemaVersion: 1,
@@ -106,6 +115,54 @@ async function writeData(req, input) {
     return normalized;
 }
 
+async function runGit(args) {
+    const result = await execFileAsync('git', ['-C', __dirname, ...args], {
+        cwd: __dirname,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+    });
+    return { stdout: String(result.stdout || '').trim(), stderr: String(result.stderr || '').trim() };
+}
+
+async function getGitInfo(fetchRemote = true) {
+    const inside = await runGit(['rev-parse', '--is-inside-work-tree']);
+    if (inside.stdout !== 'true') throw Object.assign(new Error('后端目录不是 Git 仓库，请按 README 使用 git clone 安装'), { code: 'not_git_repository' });
+    const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])).stdout;
+    const localCommit = (await runGit(['rev-parse', 'HEAD'])).stdout;
+    if (fetchRemote) await runGit(['fetch', '--quiet', 'origin']);
+    let upstreamCommit = '';
+    let behind = 0;
+    try {
+        upstreamCommit = (await runGit(['rev-parse', '@{u}'])).stdout;
+        behind = Number((await runGit(['rev-list', '--count', 'HEAD..@{u}'])).stdout || 0);
+    } catch (error) {
+        throw Object.assign(new Error('后端仓库没有可用的上游分支'), { code: 'upstream_unavailable' });
+    }
+    let remoteUrl = '';
+    try { remoteUrl = (await runGit(['remote', 'get-url', 'origin'])).stdout; } catch (error) {}
+    return {
+        updateSupported: true,
+        currentBranchName: branch,
+        currentCommitHash: localCommit,
+        upstreamCommitHash: upstreamCommit,
+        shortCommitHash: localCommit.slice(0, 7),
+        isUpToDate: behind === 0,
+        behind,
+        remoteUrl,
+    };
+}
+
+function enqueueUpdate(task) {
+    const next = updateQueue.then(task, task);
+    updateQueue = next.catch(() => {});
+    return next;
+}
+
+function isAdminRequest(req) {
+    return Boolean(req && req.user && req.user.profile && req.user.profile.admin);
+}
+
 async function init(router) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -113,8 +170,50 @@ async function init(router) {
         try {
             const data = await readData(req);
             res.set('Cache-Control', 'no-store');
-            res.json({ ok: true, pluginId: info.id, version: '1.0.0', schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length });
+            res.json({ ok: true, pluginId: info.id, version: packageInfo.version, schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length });
         } catch (error) { sendError(res, 500, error.message); }
+    });
+
+    router.get('/version', async (req, res) => {
+        try {
+            const git = await getGitInfo(true);
+            res.set('Cache-Control', 'no-store');
+            res.json({ ok: true, version: packageInfo.version, ...git });
+        } catch (error) {
+            const unsupported = ['not_git_repository', 'upstream_unavailable'].includes(error && error.code);
+            if (unsupported) return res.json({ ok: true, version: packageInfo.version, updateSupported: false, isUpToDate: true, error: error.message, code: error.code });
+            sendError(res, 502, error.message, error.code || 'git_check_failed');
+        }
+    });
+
+    router.post('/update', async (req, res) => {
+        if (!isAdminRequest(req)) return sendError(res, 403, '只有酒馆管理员可以更新服务端插件', 'admin_required');
+        try {
+            const result = await enqueueUpdate(async () => {
+                const before = await getGitInfo(true);
+                if (before.isUpToDate) return { before, after: before, output: 'Already up to date.' };
+                const pull = await runGit(['pull', '--ff-only']);
+                const after = await getGitInfo(false);
+                return { before, after, output: pull.stdout || pull.stderr };
+            });
+            const updated = result.before.currentCommitHash !== result.after.currentCommitHash;
+            let installedVersion = packageInfo.version;
+            try { installedVersion = JSON.parse(await fsp.readFile(path.join(__dirname, 'package.json'), 'utf8')).version || installedVersion; } catch (error) {}
+            res.json({
+                ok: true,
+                updated,
+                isUpToDate: result.after.isUpToDate,
+                previousCommitHash: result.before.currentCommitHash,
+                currentCommitHash: result.after.currentCommitHash,
+                shortCommitHash: result.after.currentCommitHash.slice(0, 7),
+                version: installedVersion,
+                restartRequired: updated,
+                message: updated ? '后端已更新，需要手动重启 Termux 中的 SillyTavern' : '后端已是最新版本',
+                output: result.output,
+            });
+        } catch (error) {
+            sendError(res, 500, error.message, error.code || 'git_update_failed');
+        }
     });
 
     router.get('/data', async (req, res) => {
