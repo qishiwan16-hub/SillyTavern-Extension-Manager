@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.4.1';
+    const SCRIPT_VERSION = '1.5.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -13,7 +13,7 @@
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), batchUpdating: false, collapsed: false, meta: {}, backend: { available: false, error: '', version: '' } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), selectedExtensions: new Set(), expandedGroups: new Set(['未分组']), batchUpdating: false, minimized: false, meta: {}, backend: { available: false, error: '', version: '' } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
     const backendUpdateState = { phase: 'idle', message: '点击按钮检查后端更新', canUpdate: false, updateSupported: false, version: '', restartRequired: false };
     let extensionApiPromise = null;
@@ -44,11 +44,13 @@
         return extensionApiPromise;
     }
 
-    async function setExtensionEnabled(extension, enabled) {
+    const groupOf = extension => String(extension?.category || '').trim() || (typeOf(extension) === 'system' ? '内置' : '未分组');
+
+    async function setExtensionEnabled(extension, enabled, reload = true) {
         const api = await getExtensionApi();
         const action = enabled ? api.enableExtension : api.disableExtension;
         if (typeof action !== 'function') throw new Error('当前酒馆版本不支持扩展启停接口');
-        await action(displayPath(extension), true);
+        await action(displayPath(extension), reload);
     }
 
     function normalizeMeta(value) {
@@ -168,24 +170,36 @@
         catch (error) { state.updates.set(folderOf(extension), { error: error.message || String(error) }); return { error: error.message || String(error) }; }
     }
 
+    function renderFloatingButton($popup) {
+        const active = Number($popup.data('em-active-detections') || 0) > 0;
+        const $icon = $popup.find('.em-float i');
+        $icon.attr('class', active ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles');
+        $popup.find('.em-float').attr('title', active ? '正在检测更新，点击展开' : '展开扩展管理器');
+    }
+
     function beginDetection($popup) {
         $popup.data('em-active-detections', Number($popup.data('em-active-detections') || 0) + 1);
+        renderFloatingButton($popup);
     }
 
     function finishDetection($popup) {
         const remaining = Math.max(0, Number($popup.data('em-active-detections') || 0) - 1);
         $popup.data('em-active-detections', remaining);
-        if (remaining === 0 && state.collapsed && $popup.is(':visible') && window.toastr) toastr.info('更新检测已完成');
+        renderFloatingButton($popup);
+        if (remaining === 0 && state.minimized && $popup.is(':visible') && window.toastr) toastr.info('更新检测已完成');
     }
 
-    function togglePanelCollapse($popup) {
-        state.collapsed = !state.collapsed;
-        $popup.toggleClass('em-collapsed', state.collapsed);
-        const $button = $popup.find('.em-minimize');
-        const label = state.collapsed ? '展开面板' : '收起面板';
-        $button.attr({ title: label, 'aria-label': label, 'aria-expanded': String(!state.collapsed) });
-        $button.find('i').toggleClass('fa-window-minimize', !state.collapsed).toggleClass('fa-plus', state.collapsed);
-        if (!state.collapsed) requestAnimationFrame(() => $popup.trigger('focus'));
+    function minimizePanel($popup) {
+        state.minimized = true;
+        $popup.addClass('em-minimized').attr('aria-modal', 'false').find('.em-box').attr('hidden', true);
+        renderFloatingButton($popup);
+        requestAnimationFrame(() => $popup.find('.em-float').trigger('focus'));
+    }
+
+    function restorePanel($popup) {
+        state.minimized = false;
+        $popup.removeClass('em-minimized').attr('aria-modal', 'true').find('.em-box').removeAttr('hidden');
+        requestAnimationFrame(() => $popup.trigger('focus'));
     }
 
     async function checkAll($popup) {
@@ -200,7 +214,7 @@
             const availableExtensions = state.extensions.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
             state.selectedUpdates = new Set(availableExtensions.map(folderOf));
             const message = availableExtensions.length ? `发现 ${availableExtensions.length} 个扩展可快速更新` : '其他扩展均为最新版本';
-            if (!state.collapsed && window.toastr) toastr.info(message);
+            if (!state.minimized && window.toastr) toastr.info(message);
         } finally {
             state.checking = false;
             renderList($popup);
@@ -1128,31 +1142,30 @@
                 #st-extension-manager-overlay .em-content { padding: 10px 14px; }
             }
 
-            #st-extension-manager-overlay.em-collapsed {
-                place-items: center;
-                padding: 12px;
+            #st-extension-manager-overlay .em-float { display: none; }
+            #st-extension-manager-overlay.em-minimized {
                 pointer-events: none;
                 background: transparent;
                 backdrop-filter: none;
                 -webkit-backdrop-filter: none;
             }
-            #st-extension-manager-overlay.em-collapsed > .em-box {
-                width: min(550px, calc(100vw - 24px)) !important;
-                height: auto !important;
-                min-height: 0 !important;
-                max-width: 550px !important;
-                max-height: none !important;
-                border: 1px solid rgba(255, 255, 255, .28);
-                border-radius: 8px;
+            #st-extension-manager-overlay.em-minimized .em-float {
+                position: fixed;
+                right: max(16px, env(safe-area-inset-right));
+                bottom: max(16px, env(safe-area-inset-bottom));
+                width: 48px;
+                height: 48px;
+                border: 1px solid rgba(255, 255, 255, .35);
+                border-radius: 50%;
+                background: var(--em-accent);
+                box-shadow: 0 8px 24px rgba(8, 14, 22, .3);
+                color: #fff;
+                display: grid;
+                place-items: center;
                 pointer-events: auto;
-                animation: none;
+                cursor: pointer;
+                font-size: 1.05em;
             }
-            #st-extension-manager-overlay.em-collapsed .em-header {
-                min-height: 58px;
-                border-bottom: 0;
-            }
-            #st-extension-manager-overlay.em-collapsed .em-toolbar,
-            #st-extension-manager-overlay.em-collapsed .em-content { display: none !important; }
 
             @media (prefers-reduced-motion: reduce) {
                 #st-extension-manager-overlay > .em-box,
@@ -1165,13 +1178,15 @@
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = false;
         const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-link"></i> 添加扩展</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="install"><form class="em-install"><h3><i class="fa-solid fa-link"></i> 从 Git 仓库添加扩展</h3><label>仓库链接<input name="url" type="url" placeholder="https://github.com/作者/仓库" required></label><div class="em-install-row"><label>分支或标签<input name="branch" placeholder="默认分支"></label><label>安装范围<select name="scope"><option value="local">仅当前用户</option><option value="global">全局安装</option></select></label></div><button type="submit" class="em-action primary"><i class="fa-solid fa-download"></i> 安装扩展</button><div class="em-install-status"></div></form></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">点击按钮检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 扩展管理器后端</h3><p class="em-backend-update-status">点击按钮检查后端更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端更新</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">点击“重新检测全部扩展”开始检查</div></div></div></div></section></main></div></div>`);
+        $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器"><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
         $('body').append($popup);
         const panelAbortController = new AbortController();
-        const close = () => { panelAbortController.abort(); state.collapsed = false; $popup.fadeOut(180, () => $popup.remove()); };
+        const close = () => { panelAbortController.abort(); state.minimized = false; $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
         $popup.on('keydown', e => { if (e.key === 'Escape') close(); });
         requestAnimationFrame(() => $popup.trigger('focus'));
-        $popup.on('click', '.em-minimize', () => togglePanelCollapse($popup));
+        $popup.on('click', '.em-minimize', () => minimizePanel($popup));
+        $popup.on('click', '.em-float', () => restorePanel($popup));
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); $popup.find('.em-box').toggleClass('em-dark', darkNow); $(this).find('i').toggleClass('fa-moon', !darkNow).toggleClass('fa-sun', darkNow); });
         $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); });
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
