@@ -86,7 +86,7 @@ http://你的酒馆地址/api/plugins/extension-manager/status
 SillyTavern/plugins/extension-manager/data/
 ```
 
-每次保存会先写临时文件再替换主文件，并把上一次数据保留为 `.bak`。分组数据保存在扩展元数据中，悬浮球大小保存在 `settings.floatingBallSize`。也可以通过 `EXTENSION_MANAGER_DATA_DIR` 环境变量指定其他数据目录。
+每次保存会先写临时文件再替换主文件，并把上一次数据保留为 `.bak`。分组数据保存在扩展元数据中，悬浮条高度保存在兼容字段 `settings.floatingBallSize`。日间/夜间偏好保存在浏览器本地，下次打开面板时自动恢复。也可以通过 `EXTENSION_MANAGER_DATA_DIR` 环境变量指定其他数据目录。
 
 ## 更新
 
@@ -97,7 +97,7 @@ cd data/<账户名>/extensions/third-party/SillyTavern-Extension-Manager
 git pull
 ```
 
-后端可以在扩展管理器的“后端管理”页面检测并更新。面板更新固定执行后端安装目录的 `git pull --ff-only`；更新完成后会提示手动重启 Termux 中的 SillyTavern，但不会自动停止或重启任何进程。
+“后端管理”页面会列出 `SillyTavern/plugins` 下全部已安装后端插件，分别显示版本和更新状态，并支持单个更新或更新全部。更新只会在对应插件的独立 Git 仓库中执行 `git pull --ff-only`；完成后提示手动重启 Termux 中的 SillyTavern，不会自动停止或重启任何进程。
 
 也可以先停止酒馆再手动更新：
 
@@ -114,4 +114,4 @@ git pull --ff-only
 - `manifest.json`：酒馆扩展清单。
 - `backend/`：后端源码镜像；实际安装建议使用独立后端仓库。
 
-扩展管理器前端不负责安装普通 Git 扩展；“后端管理”页面用于安装指引、检测服务端插件版本和执行后端更新。
+扩展管理器前端不负责安装普通 Git 扩展；“后端管理”页面提供管理后端安装指引，并检测、展示和更新所有已安装的服务端插件。
