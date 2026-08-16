@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.14.0';
+    const SCRIPT_VERSION = '1.14.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -20,6 +20,7 @@
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
     const THEME_STORAGE_KEY = 'st-extension-manager-theme';
     const FLOAT_POSITION_STORAGE_KEY = 'st-extension-manager-float-position';
+    const FRONTEND_META_STORAGE_KEY = 'st-extension-manager-frontend-meta-v1';
     const FLOATING_BALL_MIN = 25;
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
@@ -116,6 +117,24 @@
         return result;
     }
 
+    function readLocalFrontendMeta() {
+        try {
+            return normalizeMeta(JSON.parse(window.localStorage.getItem(FRONTEND_META_STORAGE_KEY) || '{}'));
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function writeLocalFrontendMeta(meta, required = false) {
+        const normalized = normalizeMeta(meta);
+        try {
+            window.localStorage.setItem(FRONTEND_META_STORAGE_KEY, JSON.stringify(normalized));
+        } catch (error) {
+            if (required) throw new Error(`浏览器本地存储不可用：${error.message || error}`);
+        }
+        return normalized;
+    }
+
     function normalizeSettings(value) {
         const source = value && typeof value === 'object' ? value : {};
         const parsed = Number.parseInt(source.floatingBallSize, 10);
@@ -172,12 +191,13 @@
             const response = await request(`${BACKEND_BASE}/data`, { method: 'GET' });
             const data = response && response.data && typeof response.data === 'object' ? response.data : {};
             state.meta = normalizeMeta(data.extensions);
+            writeLocalFrontendMeta(state.meta);
             state.backendMeta = normalizeMeta(data.backendPlugins);
             state.whitelist = normalizeWhitelist(data.whitelist);
             state.settings = normalizeSettings(data.settings);
             state.backend = { available: true, error: '', version: String(status?.version || ''), supportsBackendMeta: Object.prototype.hasOwnProperty.call(data, 'backendPlugins'), supportsWhitelist: Number(status?.schemaVersion || 0) >= 4 && Object.prototype.hasOwnProperty.call(data, 'whitelist') };
         } catch (error) {
-            state.meta = {};
+            state.meta = readLocalFrontendMeta();
             state.backendMeta = {};
             state.whitelist = normalizeWhitelist(state.whitelist);
             state.settings = normalizeSettings(state.settings);
@@ -194,6 +214,17 @@
         state.backendMeta = normalizeMeta(data.backendPlugins || payload.backendPlugins);
         state.whitelist = normalizeWhitelist(data.whitelist || payload.whitelist);
         state.settings = normalizeSettings(data.settings || payload.settings);
+        return state.meta;
+    }
+
+    async function saveFrontendMeta(meta) {
+        const normalized = normalizeMeta(meta);
+        if (state.backend.available) {
+            await saveServerMeta(normalized);
+            writeLocalFrontendMeta(state.meta);
+        } else {
+            state.meta = writeLocalFrontendMeta(normalized, true);
+        }
         return state.meta;
     }
 
@@ -1259,7 +1290,6 @@
     }
 
     async function updateExtensionGroups(assignments) {
-        if (!state.backend.available) throw new Error('服务端存储未连接，无法保存分组');
         const nextMeta = { ...state.meta };
         Object.entries(assignments || {}).forEach(([folder, group]) => {
             const current = nextMeta[folder] && typeof nextMeta[folder] === 'object' ? nextMeta[folder] : {};
@@ -1267,7 +1297,7 @@
             if (item.name || item.note || item.category) nextMeta[folder] = item;
             else delete nextMeta[folder];
         });
-        await saveServerMeta(nextMeta);
+        await saveFrontendMeta(nextMeta);
         state.extensions.forEach(extension => {
             const folder = folderOf(extension);
             if (Object.prototype.hasOwnProperty.call(assignments, folder) && typeOf(extension) !== 'system') {
@@ -1811,7 +1841,7 @@
     function renderBackendState($popup) {
         const $status = $popup.find('.em-backend-state');
         $status.toggleClass('ok', state.backend.available).toggleClass('error', !state.backend.available);
-        $status.text(state.backend.available ? `服务端存储已连接${state.backend.version ? ` v${state.backend.version}` : ''}` : '服务端存储未连接');
+        $status.text(state.backend.available ? `服务端存储已连接${state.backend.version ? ` v${state.backend.version}` : ''}` : '后端未连接 · 前端标注使用浏览器本地存储');
         if (!state.backend.available && state.backend.error) $status.attr('title', state.backend.error);
         renderBackendPanel($popup);
         renderInstallPanel($popup);
@@ -3267,7 +3297,7 @@
             const nextMeta = { ...state.meta, [folder]: { name: String(editor.find('.em-name-input').val() || '').trim(), note: String(editor.find('.em-note-input').val() || '').trim(), category: normalizedCategory } };
             $button.prop('disabled', true);
             try {
-                await saveServerMeta(nextMeta);
+                await saveFrontendMeta(nextMeta);
                 const saved = state.meta[folder] || {};
                 extension.zhName = saved.name || chineseValue(extension.manifest, ['display_name_zh', 'displayNameZh', 'zh_name', 'name_zh']);
                 extension.note = saved.note || chineseValue(extension.manifest, ['description_zh', 'descriptionZh', 'zh_description', 'note_zh', 'remarks_zh']);
@@ -3276,7 +3306,7 @@
                 extension.displayName = extension.zhName || extension.manifest.display_name || folder;
                 extension.description = extension.note || extension.manifest.description || '暂无备注';
                 renderList($popup);
-                if (window.toastr) toastr.success('中文资料已保存到酒馆后端');
+                if (window.toastr) toastr.success(state.backend.available ? '中文资料已保存到酒馆后端' : '中文资料已保存到浏览器本地');
             } catch (error) {
                 if (window.toastr) toastr.error(`保存失败：${error.message || error}`);
                 $button.prop('disabled', false);
