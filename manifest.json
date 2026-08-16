@@ -5,7 +5,7 @@
   "optional": [],
   "js": "index.js",
   "author": "qishiwan16-hub",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "集中管理、分组和热更新酒馆扩展",
   "homePage": "https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager"
 }

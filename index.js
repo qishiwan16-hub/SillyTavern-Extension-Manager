@@ -4,10 +4,11 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.7.1';
+    const SCRIPT_VERSION = '1.7.2';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
+    const FLOAT_ID = 'st-extension-manager-float';
     const BACKEND_BASE = '/api/plugins/extension-manager';
     const EXTENSION_DEFAULT_FOLDER = 'SillyTavern-Extension-Manager';
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
@@ -79,12 +80,21 @@
         return { floatingBallSize };
     }
 
+    const getFloatingBar = () => $(`#${FLOAT_ID}`);
+
     function applyFloatingBallSize($popup) {
         const size = normalizeSettings(state.settings).floatingBallSize;
         state.settings.floatingBallSize = size;
         $popup.css('--em-float-size', `${size}px`);
+        getFloatingBar().css('--em-float-size', `${size}px`);
         $popup.find('.em-float-size').val(size);
         $popup.find('.em-float-size-value').text(`${size}px`);
+    }
+
+    function resetFloatingBarPosition() {
+        const bar = getFloatingBar()[0];
+        if (!bar) return;
+        ['left', 'top', 'right', 'bottom'].forEach(property => bar.style.removeProperty(property));
     }
 
     async function loadServerMeta() {
@@ -203,9 +213,10 @@
 
     function renderFloatingButton($popup) {
         const active = Number($popup.data('em-active-detections') || 0) > 0;
-        const $icon = $popup.find('.em-float i');
-        $icon.attr('class', active ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-wand-magic-sparkles');
-        $popup.find('.em-float').attr('title', active ? '正在检测更新，点击展开' : '展开扩展管理器');
+        const $bar = getFloatingBar();
+        $bar.find('.em-float-state').attr('class', active ? 'em-float-state fa-solid fa-spinner fa-spin' : 'em-float-state fa-solid fa-grip-lines');
+        $bar.attr('title', active ? '正在检测更新，可拖动悬浮条' : '拖动悬浮条调整位置');
+        $bar.find('.em-float-restore').attr('title', active ? '正在检测更新，点击展开' : '展开扩展管理器');
     }
 
     function beginDetection($popup) {
@@ -224,24 +235,18 @@
         state.minimized = true;
         $popup.addClass('em-minimized').attr('aria-modal', 'false').find('.em-box').attr('hidden', true);
         $popup.find('.em-minimize').attr('aria-expanded', 'false');
-        $popup.find('.em-float').prop('hidden', false).attr('aria-expanded', 'false').css({
-            display: 'grid',
-            visibility: 'visible',
-            pointerEvents: 'auto',
-        });
+        const $bar = getFloatingBar();
+        $bar.prop('hidden', false).css({ display: 'flex', visibility: 'visible', pointerEvents: 'auto' });
         renderFloatingButton($popup);
-        requestAnimationFrame(() => $popup.find('.em-float').trigger('focus'));
+        requestAnimationFrame(() => $bar.find('.em-float-restore').trigger('focus'));
     }
 
     function restorePanel($popup) {
         state.minimized = false;
         $popup.removeClass('em-minimized').attr('aria-modal', 'true').find('.em-box').removeAttr('hidden');
         $popup.find('.em-minimize').attr('aria-expanded', 'true');
-        $popup.find('.em-float').prop('hidden', true).attr('aria-expanded', 'true').css({
-            display: '',
-            visibility: '',
-            pointerEvents: '',
-        });
+        getFloatingBar().prop('hidden', true).css({ display: '', visibility: '', pointerEvents: '' });
+        resetFloatingBarPosition();
         requestAnimationFrame(() => $popup.trigger('focus'));
     }
 
@@ -1329,47 +1334,91 @@
                 #st-extension-manager-overlay .em-content { padding: 10px 14px; }
             }
 
-            #st-extension-manager-overlay .em-float,
-            #st-extension-manager-overlay .em-float[hidden] { display: none !important; }
             #st-extension-manager-overlay.em-minimized {
                 pointer-events: none;
                 background: transparent;
                 backdrop-filter: none;
                 -webkit-backdrop-filter: none;
             }
-            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]) {
+
+            #st-extension-manager-float,
+            #st-extension-manager-float[hidden] { display: none !important; }
+            #st-extension-manager-float:not([hidden]) {
+                --em-accent: var(--SmartThemeQuoteColor, #376f91);
                 position: fixed !important;
-                inset: auto max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) auto !important;
-                z-index: 2147483001 !important;
-                display: grid !important;
+                inset: auto max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) auto !important;
+                z-index: 2147483646 !important;
+                display: flex !important;
                 visibility: visible !important;
-                width: var(--em-float-size, 34px) !important;
+                align-items: stretch;
+                width: min(168px, calc(100vw - 16px)) !important;
                 height: var(--em-float-size, 34px) !important;
-                min-width: var(--em-float-size, 34px) !important;
-                min-height: var(--em-float-size, 34px) !important;
-                max-width: var(--em-float-size, 34px) !important;
-                max-height: var(--em-float-size, 34px) !important;
+                min-width: 118px !important;
+                min-height: 25px !important;
+                max-width: calc(100vw - 16px) !important;
+                max-height: 56px !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                border: 1px solid rgba(255, 255, 255, .26);
-                border-radius: 50%;
-                background: var(--em-accent);
-                box-shadow: 0 3px 10px rgba(8, 14, 22, .2);
-                color: #fff;
-                place-items: center;
+                border: 1px solid rgba(255, 255, 255, .3) !important;
+                border-radius: 5px !important;
+                background: var(--em-accent) !important;
+                box-shadow: 0 4px 14px rgba(8, 14, 22, .24) !important;
+                color: #fff !important;
                 box-sizing: border-box;
                 transform: none !important;
+                opacity: .9 !important;
                 pointer-events: auto !important;
-                cursor: pointer;
-                font-size: .78em;
-                line-height: 1;
-                opacity: .82;
-                transition: opacity .14s ease, box-shadow .14s ease;
+                cursor: grab;
+                touch-action: none;
+                user-select: none;
+                -webkit-user-select: none;
             }
-            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]):hover,
-            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]):focus-visible {
-                opacity: 1;
-                box-shadow: 0 4px 14px rgba(8, 14, 22, .28);
+            #st-extension-manager-float.em-dragging {
+                cursor: grabbing;
+                opacity: 1 !important;
+            }
+            #st-extension-manager-float .em-float-label {
+                min-width: 0;
+                padding: 0 9px;
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                flex: 1 1 auto;
+                overflow: hidden;
+                font-size: 12px;
+                line-height: 1;
+                white-space: nowrap;
+                pointer-events: none;
+            }
+            #st-extension-manager-float .em-float-label span {
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #st-extension-manager-float .em-float-restore {
+                width: var(--em-float-size, 34px) !important;
+                height: 100% !important;
+                min-width: 25px !important;
+                min-height: 25px !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: 0 !important;
+                border-left: 1px solid rgba(255, 255, 255, .3) !important;
+                border-radius: 0 4px 4px 0 !important;
+                background: rgba(0, 0, 0, .12) !important;
+                color: #fff !important;
+                display: grid !important;
+                place-items: center;
+                flex: 0 0 auto;
+                cursor: pointer;
+                font-size: 12px;
+                line-height: 1;
+                pointer-events: auto !important;
+            }
+            #st-extension-manager-float .em-float-restore:hover,
+            #st-extension-manager-float .em-float-restore:focus-visible {
+                background: rgba(0, 0, 0, .25) !important;
+                outline: 2px solid rgba(255, 255, 255, .72);
+                outline-offset: -3px;
             }
 
             @media (prefers-reduced-motion: reduce) {
@@ -1382,18 +1431,52 @@
     async function showPopup() {
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = false;
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展并选择更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><div class="em-update-selection"><div class="em-update-empty">点击“检测更新”开始检查</div></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
+        $(`#${FLOAT_ID}`).remove();
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展并选择更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><div class="em-update-selection"><div class="em-update-empty">点击“检测更新”开始检查</div></div><label class="em-float-size-control"><span>悬浮条高度</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
 git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">更新只执行后端目录的 <code>git pull --ff-only</code>，不会停止或重启 Termux/SillyTavern；更新完成后请手动重启。</p></div></section></main></div></div>`);
-        $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器" aria-expanded="false" hidden><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
-        $('body').append($popup);
+        const $float = $(`<div id="${FLOAT_ID}" class="em-float" title="拖动悬浮条调整位置" aria-label="扩展管理器悬浮条" hidden><span class="em-float-label"><i class="em-float-state fa-solid fa-grip-lines"></i><span>扩展管理器</span></span><button type="button" class="em-float-restore" title="展开扩展管理器" aria-label="展开扩展管理器"><i class="fa-solid fa-plus"></i></button></div>`);
+        $('body').append($popup, $float);
         applyFloatingBallSize($popup);
         const panelAbortController = new AbortController();
-        const close = () => { panelAbortController.abort(); state.minimized = false; $popup.fadeOut(180, () => $popup.remove()); };
+        const close = () => { panelAbortController.abort(); state.minimized = false; $float.remove(); $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
         $popup.on('keydown', e => { if (e.key === 'Escape') close(); });
         requestAnimationFrame(() => $popup.trigger('focus'));
         $popup.on('click', '.em-minimize', () => minimizePanel($popup));
-        $popup.on('click', '.em-float', () => restorePanel($popup));
+        $float.on('click', '.em-float-restore', () => restorePanel($popup));
+        let floatDrag = null;
+        $float.on('pointerdown', function (event) {
+            if ($(event.target).closest('.em-float-restore').length) return;
+            const pointer = event.originalEvent || event;
+            if (pointer.button !== undefined && pointer.button !== 0) return;
+            const rect = this.getBoundingClientRect();
+            floatDrag = { pointerId: pointer.pointerId, offsetX: pointer.clientX - rect.left, offsetY: pointer.clientY - rect.top };
+            this.setPointerCapture?.(pointer.pointerId);
+            $(this).addClass('em-dragging');
+            event.preventDefault();
+        });
+        $float.on('pointermove', function (event) {
+            const pointer = event.originalEvent || event;
+            if (!floatDrag || pointer.pointerId !== floatDrag.pointerId) return;
+            const rect = this.getBoundingClientRect();
+            const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+            const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+            const left = Math.min(maxLeft, Math.max(8, pointer.clientX - floatDrag.offsetX));
+            const top = Math.min(maxTop, Math.max(8, pointer.clientY - floatDrag.offsetY));
+            this.style.setProperty('left', `${left}px`, 'important');
+            this.style.setProperty('top', `${top}px`, 'important');
+            this.style.setProperty('right', 'auto', 'important');
+            this.style.setProperty('bottom', 'auto', 'important');
+            event.preventDefault();
+        });
+        $float.on('pointerup pointercancel', function (event) {
+            const pointer = event.originalEvent || event;
+            if (!floatDrag || pointer.pointerId !== floatDrag.pointerId) return;
+            if (this.hasPointerCapture?.(pointer.pointerId)) this.releasePointerCapture(pointer.pointerId);
+            floatDrag = null;
+            $(this).removeClass('em-dragging');
+        });
+        window.addEventListener('resize', resetFloatingBarPosition, { signal: panelAbortController.signal });
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); $popup.find('.em-box').toggleClass('em-dark', darkNow); $(this).find('i').toggleClass('fa-moon', !darkNow).toggleClass('fa-sun', darkNow); });
         $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void checkBackendUpdate($popup); });
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
@@ -1404,7 +1487,7 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
             try {
                 await saveServerSettings({ floatingBallSize: $(this).val() });
                 applyFloatingBallSize($popup);
-                if (window.toastr) toastr.success('悬浮球大小已保存');
+                if (window.toastr) toastr.success('悬浮条高度已保存');
             } catch (error) {
                 if (window.toastr) toastr.warning(`当前大小仅本次有效：${error.message || error}`);
             }
@@ -1508,5 +1591,5 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
     injectStyle();
     timers.push(setTimeout(injectMenu, 500));
     timers.push(setInterval(injectMenu, 2000));
-    window.__extensionManagerCleanup = () => { timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
+    window.__extensionManagerCleanup = () => { timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
 })();
