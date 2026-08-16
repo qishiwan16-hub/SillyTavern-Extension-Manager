@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.11.0';
+    const SCRIPT_VERSION = '1.12.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -24,9 +24,9 @@
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), checkingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', selectionMode: false, batchUpdating: false, batchToggling: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backendInstallPlatform: 'termux', backend: { available: false, error: '', version: '' } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), checkingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', selectionMode: false, batchUpdating: false, batchToggling: false, minimized: false, meta: {}, backendMeta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backendInstallPlatform: 'termux', backend: { available: false, error: '', version: '', supportsBackendMeta: false } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
-    const backendUpdateState = { phase: 'idle', message: '点击按钮检测全部已安装后端插件', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false };
+    const backendUpdateState = { phase: 'idle', message: '读取后端插件后可检测更新', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false, checkingPlugins: new Set(), checkedPlugins: new Set(), selectedPlugins: new Set(), expandedGroups: new Set(), groupPickerSelections: new Set(), groupPicker: '', selectionMode: false, filter: '', category: '', sort: 'name' };
     let extensionApiPromise = null;
 
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
@@ -152,29 +152,38 @@
     }
 
     async function loadServerMeta() {
-        state.backend = { available: false, error: '', version: '' };
+        state.backend = { available: false, error: '', version: '', supportsBackendMeta: false };
         try {
             const status = await request(`${BACKEND_BASE}/status`, { method: 'GET' });
             const response = await request(`${BACKEND_BASE}/data`, { method: 'GET' });
             const data = response && response.data && typeof response.data === 'object' ? response.data : {};
             state.meta = normalizeMeta(data.extensions);
+            state.backendMeta = normalizeMeta(data.backendPlugins);
             state.settings = normalizeSettings(data.settings);
-            state.backend = { available: true, error: '', version: String(status?.version || '') };
+            state.backend = { available: true, error: '', version: String(status?.version || ''), supportsBackendMeta: Object.prototype.hasOwnProperty.call(data, 'backendPlugins') };
         } catch (error) {
             state.meta = {};
+            state.backendMeta = {};
             state.settings = normalizeSettings(state.settings);
-            state.backend = { available: false, error: error.message || String(error), version: '' };
+            state.backend = { available: false, error: error.message || String(error), version: '', supportsBackendMeta: false };
         }
     }
 
-    async function saveServerMeta(meta, settings = state.settings) {
+    async function saveServerMeta(meta, settings = state.settings, backendMeta = state.backendMeta) {
         if (!state.backend.available) throw new Error('服务端存储未连接，请先安装并启用后端插件');
-        const payload = { extensions: normalizeMeta(meta), settings: normalizeSettings(settings) };
+        const payload = { extensions: normalizeMeta(meta), backendPlugins: normalizeMeta(backendMeta), settings: normalizeSettings(settings) };
         const response = await request(`${BACKEND_BASE}/data`, { method: 'PUT', body: JSON.stringify(payload) });
         const data = response && response.data && typeof response.data === 'object' ? response.data : {};
         state.meta = normalizeMeta(data.extensions);
+        state.backendMeta = normalizeMeta(data.backendPlugins || payload.backendPlugins);
         state.settings = normalizeSettings(data.settings || payload.settings);
         return state.meta;
+    }
+
+    async function saveBackendMeta(meta) {
+        if (!state.backend.supportsBackendMeta) throw new Error('管理后端版本过旧，请先更新并手动重启 SillyTavern');
+        await saveServerMeta(state.meta, state.settings, meta);
+        return state.backendMeta;
     }
 
     async function saveServerSettings(settings) {
@@ -421,65 +430,214 @@
         return selfUpdateState;
     }
 
+    function backendMetadata(pluginId) {
+        const meta = state.backendMeta[pluginId];
+        return meta && typeof meta === 'object' ? meta : {};
+    }
+
     function normalizeBackendPlugins(value) {
         if (!Array.isArray(value)) return [];
-        return value.map(item => ({
-            id: String(item?.id || ''),
-            name: String(item?.name || item?.id || '未命名后端插件'),
-            version: String(item?.version || ''),
-            description: String(item?.description || ''),
-            currentBranchName: String(item?.currentBranchName || ''),
-            shortCommitHash: String(item?.shortCommitHash || ''),
-            updateSupported: item?.updateSupported !== false,
-            isUpToDate: item?.isUpToDate !== false,
-            behind: Math.max(0, Number(item?.behind || 0)),
-            error: String(item?.error || ''),
-            code: String(item?.code || ''),
-            isManager: item?.isManager === true,
-            legacy: item?.legacy === true,
-            updating: item?.updating === true,
-            restartRequired: item?.restartRequired === true,
-        })).filter(plugin => plugin.id);
+        return value.map(item => {
+            const id = String(item?.id || '').trim();
+            const meta = backendMetadata(id);
+            const nativeName = String(item?.nativeName || item?.name || id || '未命名后端插件');
+            const nativeDescription = String(item?.nativeDescription || item?.description || '');
+            return {
+                id,
+                nativeName,
+                name: String(meta.name || nativeName),
+                version: String(item?.version || ''),
+                nativeDescription,
+                description: String(meta.note || nativeDescription),
+                note: String(meta.note || ''),
+                category: String(meta.category || ''),
+                currentBranchName: String(item?.currentBranchName || ''),
+                shortCommitHash: String(item?.shortCommitHash || ''),
+                updateSupported: typeof item?.updateSupported === 'boolean' ? item.updateSupported : null,
+                isUpToDate: typeof item?.isUpToDate === 'boolean' ? item.isUpToDate : null,
+                behind: Math.max(0, Number(item?.behind || 0)),
+                error: String(item?.error || ''),
+                code: String(item?.code || ''),
+                isManager: item?.isManager === true,
+                legacy: item?.legacy === true,
+                updating: item?.updating === true,
+                restartRequired: item?.restartRequired === true,
+            };
+        }).filter(plugin => plugin.id);
+    }
+
+    function mergeBackendPlugins(value) {
+        const incoming = normalizeBackendPlugins(value);
+        const current = new Map(backendUpdateState.plugins.map(plugin => [plugin.id, plugin]));
+        incoming.forEach(plugin => {
+            const existing = current.get(plugin.id);
+            if (existing) Object.assign(existing, plugin);
+            else backendUpdateState.plugins.push(plugin);
+        });
+        backendUpdateState.plugins.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans') || a.id.localeCompare(b.id));
+        return incoming;
+    }
+
+    const backendGroupOf = plugin => String(plugin?.category || '').trim() || '未分组';
+
+    function filteredBackendPlugins() {
+        const filter = backendUpdateState.filter.toLowerCase();
+        return backendUpdateState.plugins.filter(plugin => {
+            const group = backendGroupOf(plugin);
+            const matchesCategory = !backendUpdateState.category || group === backendUpdateState.category;
+            const matchesText = !filter || [plugin.name, plugin.nativeName, plugin.id, plugin.description, group].join(' ').toLowerCase().includes(filter);
+            return matchesCategory && matchesText;
+        }).sort((a, b) => {
+            if (backendUpdateState.sort === 'status') {
+                const rank = plugin => backendUpdateState.checkingPlugins.has(plugin.id) || plugin.updating ? 0 : (backendUpdateState.checkedPlugins.has(plugin.id) && plugin.isUpToDate === false ? 1 : (backendUpdateState.checkedPlugins.has(plugin.id) ? 2 : 3));
+                return rank(a) - rank(b) || a.name.localeCompare(b.name, 'zh-Hans');
+            }
+            return a.name.localeCompare(b.name, 'zh-Hans') || a.id.localeCompare(b.id);
+        });
+    }
+
+    function renderBackendCategoryOptions($popup) {
+        const categories = Array.from(new Set(backendUpdateState.plugins.map(backendGroupOf))).sort((a, b) => {
+            if (a === '未分组') return 1;
+            if (b === '未分组') return -1;
+            return a.localeCompare(b, 'zh-Hans');
+        });
+        if (backendUpdateState.category && !categories.includes(backendUpdateState.category)) backendUpdateState.category = '';
+        const options = ['<option value="">全部分组</option>']
+            .concat(categories.map(category => '<option value="' + escapeHtml(category) + '"' + (backendUpdateState.category === category ? ' selected' : '') + '>' + escapeHtml(category) + '</option>'))
+            .join('');
+        $popup.find('.em-backend-category-filter').html(options);
+    }
+
+    function renderBackendGroupPicker(group) {
+        const candidates = backendUpdateState.plugins
+            .filter(plugin => backendGroupOf(plugin) !== group)
+            .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans'));
+        const choices = candidates.length
+            ? candidates.map(plugin => '<label class="em-group-choice em-backend-group-choice"><input type="checkbox" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (backendUpdateState.groupPickerSelections.has(plugin.id) ? ' checked' : '') + '><span><strong>' + escapeHtml(plugin.name) + '</strong><small>' + escapeHtml(backendGroupOf(plugin)) + '</small></span></label>').join('')
+            : '<div class="em-group-picker-empty">没有可添加的后端插件</div>';
+        return '<div class="em-group-picker" data-backend-group-picker="' + escapeHtml(group) + '"><div class="em-group-picker-list">' + choices + '</div><div class="em-group-picker-actions"><button type="button" class="em-action em-backend-group-cancel"><i class="fa-solid fa-xmark"></i> 取消</button><button type="button" class="em-action primary em-backend-group-add-save" data-group="' + escapeHtml(group) + '"' + (candidates.length ? '' : ' disabled') + '><i class="fa-solid fa-folder-plus"></i> 添加选中</button></div></div>';
+    }
+
+    function renderBackendPluginCard(plugin) {
+        const checked = backendUpdateState.checkedPlugins.has(plugin.id);
+        const checking = backendUpdateState.checkingPlugins.has(plugin.id);
+        const selected = backendUpdateState.selectedPlugins.has(plugin.id);
+        const available = checked && plugin.updateSupported === true && plugin.isUpToDate === false;
+        const status = plugin.updating
+            ? '更新中'
+            : checking
+                ? '检测中'
+                : plugin.restartRequired
+                    ? '已更新，待重启'
+                    : !checked
+                        ? '未检测'
+                        : plugin.error
+                            ? '检测失败'
+                            : available
+                                ? (plugin.behind ? '可更新 · 落后 ' + plugin.behind : '可更新')
+                                : plugin.updateSupported === false
+                                    ? '不可自动更新'
+                                    : '最新';
+        const statusClass = available ? 'update' : '';
+        const details = [plugin.id, plugin.version ? 'v' + plugin.version : '', plugin.currentBranchName, plugin.shortCommitHash].filter(Boolean).join(' · ');
+        const leading = backendUpdateState.selectionMode
+            ? '<label class="em-card-choice' + (selected ? ' is-selected' : '') + '" title="选择 ' + escapeHtml(plugin.name) + '"><input type="checkbox" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (selected ? ' checked' : '') + '><i class="fa-solid fa-check"></i></label>'
+            : '<div class="em-card-icon"><i class="fa-solid fa-server"></i></div>';
+        const note = plugin.error || plugin.description || '暂无备注';
+        return '<article class="em-card em-backend-card' + (available ? ' is-update' : '') + (selected ? ' is-selected' : '') + '" data-plugin-id="' + escapeHtml(plugin.id) + '">' +
+            leading +
+            '<div class="em-card-body">' +
+                '<div class="em-card-head"><div class="em-card-title">' + escapeHtml(plugin.name) + (plugin.isManager ? ' <span class="em-type">管理后端</span>' : '') + (backendGroupOf(plugin) !== '未分组' ? ' <span class="em-category">' + escapeHtml(backendGroupOf(plugin)) + '</span>' : '') + '</div><span class="em-status ' + statusClass + '">' + escapeHtml(status) + '</span></div>' +
+                '<div class="em-card-sub">' + escapeHtml(details || plugin.id) + '</div>' +
+                '<div class="em-card-note">' + escapeHtml(note) + '</div>' +
+                '<div class="em-card-actions">' +
+                    (state.backend.supportsBackendMeta ? '<button type="button" class="em-action em-backend-edit" data-plugin-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>' : '') +
+                    '<button type="button" class="em-action em-check-backend-plugin" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating || backendUpdateState.batchUpdating || ['loading', 'checking', 'updating'].includes(backendUpdateState.phase) ? ' disabled' : '') + '><i class="fa-solid fa-magnifying-glass"></i> 检测</button>' +
+                    (available ? '<button type="button" class="em-action primary em-update-backend-plugin" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (plugin.updating || backendUpdateState.batchUpdating ? ' disabled' : '') + '><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button>' : '') +
+                '</div>' +
+                '<div class="em-editor em-backend-editor" data-backend-editor="' + escapeHtml(plugin.id) + '" hidden><label>中文名<input class="em-backend-name-input" value="' + escapeHtml(backendMetadata(plugin.id).name || '') + '" maxlength="80"></label><label>分组<input class="em-backend-category-input" value="' + escapeHtml(plugin.category || '') + '" maxlength="80" placeholder="输入名称即可形成分组文件夹"></label><label>备注<textarea class="em-backend-note-input" maxlength="500">' + escapeHtml(plugin.note || '') + '</textarea></label><button type="button" class="em-save-meta primary em-backend-save-meta" data-plugin-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-floppy-disk"></i> 保存</button></div>' +
+            '</div>' +
+        '</article>';
+    }
+
+    function renderBackendGroup(group, plugins) {
+        const expanded = backendUpdateState.expandedGroups.has(group) || backendUpdateState.groupPicker === group;
+        const custom = state.backend.supportsBackendMeta && group !== '未分组';
+        const actions = custom
+            ? '<div class="em-group-actions"><button type="button" class="em-icon em-backend-group-add" data-group="' + escapeHtml(group) + '" title="添加后端插件" aria-label="向 ' + escapeHtml(group) + ' 添加后端插件"><i class="fa-solid fa-folder-plus"></i></button><button type="button" class="em-icon em-backend-group-rename" data-group="' + escapeHtml(group) + '" title="重命名分组" aria-label="重命名 ' + escapeHtml(group) + '"><i class="fa-solid fa-pen"></i></button><button type="button" class="em-icon em-backend-group-dissolve" data-group="' + escapeHtml(group) + '" title="解散分组" aria-label="解散 ' + escapeHtml(group) + '"><i class="fa-solid fa-folder-minus"></i></button></div>'
+            : '';
+        const picker = backendUpdateState.groupPicker === group ? renderBackendGroupPicker(group) : '';
+        const icon = expanded ? 'fa-folder-open' : 'fa-folder';
+        return '<section class="em-group em-backend-group" data-backend-group="' + escapeHtml(group) + '"><header class="em-group-head"><button type="button" class="em-icon em-backend-group-toggle" data-group="' + escapeHtml(group) + '" title="' + (expanded ? '收起' : '展开') + '分组" aria-label="' + (expanded ? '收起 ' : '展开 ') + escapeHtml(group) + '" aria-expanded="' + expanded + '"><i class="fa-solid fa-chevron-' + (expanded ? 'down' : 'right') + '"></i></button><i class="fa-solid ' + icon + ' em-group-folder"></i><strong>' + escapeHtml(group) + '</strong><span class="em-group-count">' + plugins.length + '</span>' + actions + '</header><div class="em-group-content"' + (expanded ? '' : ' hidden') + '><div class="em-group-cards">' + plugins.map(renderBackendPluginCard).join('') + '</div>' + picker + '</div></section>';
+    }
+
+    function renderBackendBatchSelection($popup) {
+        const $toolbar = $popup.find('.em-backend-batch-toolbar');
+        const $toggle = $popup.find('.em-backend-multi-toggle');
+        if (!$toolbar.length) return;
+        $toggle.toggleClass('active', backendUpdateState.selectionMode).attr('aria-pressed', String(backendUpdateState.selectionMode));
+        $toggle.find('span').text(backendUpdateState.selectionMode ? '退出多选' : '多选');
+        $toolbar.prop('hidden', !backendUpdateState.selectionMode);
+        if (!backendUpdateState.selectionMode) return;
+
+        const selected = backendUpdateState.plugins.filter(plugin => backendUpdateState.selectedPlugins.has(plugin.id));
+        const detected = selected.filter(plugin => backendUpdateState.checkedPlugins.has(plugin.id));
+        const available = selected.filter(plugin => backendUpdateState.checkedPlugins.has(plugin.id) && plugin.updateSupported === true && plugin.isUpToDate === false);
+        const undetected = selected.length - detected.length;
+        const customGroups = Array.from(new Set(backendUpdateState.plugins.map(backendGroupOf).filter(group => group !== '未分组'))).sort((a, b) => a.localeCompare(b, 'zh-Hans'));
+        const groupOptions = ['<option value="">未分组</option>'].concat(customGroups.map(group => '<option value="' + escapeHtml(group) + '">' + escapeHtml(group) + '</option>'), ['<option value="__new__">新建分组...</option>']).join('');
+        const busy = backendUpdateState.batchUpdating || ['checking', 'updating', 'loading'].includes(backendUpdateState.phase);
+        const updateDisabled = busy || !available.length || undetected > 0;
+        const status = selected.length
+            ? '已选 ' + selected.length + ' 个 · 已检测 ' + detected.length + ' 个' + (available.length ? ' · 可更新 ' + available.length + ' 个' : '') + (undetected ? ' · 未检测 ' + undetected + ' 个' : '')
+            : '请选择后端插件';
+        $toolbar.html('<div class="em-batch-summary"><strong>批量操作</strong><span>' + status + '</span></div><div class="em-batch-controls"><button type="button" class="em-action em-backend-select-visible"><i class="fa-solid fa-list-check"></i> 全选当前</button><button type="button" class="em-action em-backend-clear-selection"' + (selected.length ? '' : ' disabled') + '><i class="fa-solid fa-xmark"></i> 清空</button><select class="em-batch-group em-backend-batch-group" aria-label="目标分组">' + groupOptions + '</select><button type="button" class="em-action em-backend-batch-group-save"' + (selected.length && !busy && state.backend.supportsBackendMeta ? '' : ' disabled') + '><i class="fa-solid fa-folder-plus"></i> 分组</button><button type="button" class="em-action em-check-selected-backend"' + (selected.length && !busy ? '' : ' disabled') + '><i class="fa-solid fa-magnifying-glass"></i> 检测选中</button><button type="button" class="em-action primary em-update-selected-backend"' + (updateDisabled ? ' disabled' : '') + ' title="' + (undetected ? '请先检测全部选中插件' : (available.length ? '更新检测到的新版本' : '没有检测到可用更新')) + '"><i class="fa-solid fa-cloud-arrow-down"></i> 更新选中</button></div><div class="em-backend-batch-status"></div>');
     }
 
     function renderBackendPluginList($popup) {
         const $list = $popup.find('.em-backend-plugin-list');
         if (!$list.length) return;
+        renderBackendCategoryOptions($popup);
+        const list = filteredBackendPlugins();
+        $popup.find('.em-backend-count').text(list.length + ' / ' + backendUpdateState.plugins.length);
         if (!backendUpdateState.plugins.length) {
-            const loading = backendUpdateState.phase === 'checking';
-            $list.html(`<div class="em-backend-plugin-empty"><i class="fa-solid ${loading ? 'fa-spinner fa-spin' : 'fa-server'}"></i><span>${loading ? '正在读取已安装后端插件' : '尚未检测到后端插件'}</span></div>`);
+            const loading = ['loading', 'checking'].includes(backendUpdateState.phase);
+            $list.html('<div class="em-backend-plugin-empty"><i class="fa-solid ' + (loading ? 'fa-spinner fa-spin' : 'fa-server') + '"></i><span>' + (loading ? '正在读取已安装后端插件' : '尚未检测到后端插件') + '</span></div>');
+            renderBackendBatchSelection($popup);
             return;
         }
-        $list.html(backendUpdateState.plugins.map(plugin => {
-            const available = plugin.updateSupported && !plugin.isUpToDate;
-            const status = plugin.updating
-                ? '更新中'
-                : plugin.restartRequired
-                    ? '已更新，待重启'
-                    : available
-                        ? `可更新${plugin.behind ? ` · 落后 ${plugin.behind}` : ''}`
-                        : plugin.updateSupported
-                            ? '最新'
-                            : '不可自动更新';
-            const statusClass = plugin.updating ? 'checking' : (plugin.restartRequired ? 'restart' : (available ? 'update' : (plugin.updateSupported ? 'latest' : 'unsupported')));
-            const details = [plugin.id, plugin.version ? `v${plugin.version}` : '', plugin.currentBranchName, plugin.shortCommitHash].filter(Boolean).join(' · ');
-            const note = plugin.error || plugin.description;
-            return `<div class="em-backend-plugin-row" data-plugin-id="${escapeHtml(plugin.id)}"><div class="em-backend-plugin-main"><div class="em-backend-plugin-copy"><strong>${escapeHtml(plugin.name)}${plugin.isManager ? ' <span class="em-type">管理后端</span>' : ''}</strong><span>${escapeHtml(details)}</span></div><div class="em-backend-plugin-actions"><span class="em-backend-plugin-status ${statusClass}">${escapeHtml(status)}</span>${available ? `<button type="button" class="em-action primary em-update-backend-plugin" data-plugin-id="${escapeHtml(plugin.id)}" ${plugin.updating || backendUpdateState.phase === 'updating' ? 'disabled' : ''}><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button>` : ''}</div></div>${note ? `<p class="${plugin.error ? 'em-backend-plugin-error' : ''}">${escapeHtml(note)}</p>` : ''}</div>`;
-        }).join(''));
+        const groups = new Map();
+        list.forEach(plugin => {
+            const group = backendGroupOf(plugin);
+            if (!groups.has(group)) groups.set(group, []);
+            groups.get(group).push(plugin);
+        });
+        const names = Array.from(groups.keys()).sort((a, b) => {
+            if (a === '未分组') return 1;
+            if (b === '未分组') return -1;
+            return a.localeCompare(b, 'zh-Hans');
+        });
+        $list.html(list.length ? names.map(name => renderBackendGroup(name, groups.get(name))).join('') : '<div class="em-empty"><i class="fa-solid fa-server"></i><span>没有匹配的后端插件</span></div>');
+        renderBackendBatchSelection($popup);
     }
 
     function renderBackendUpdate($popup) {
-        backendUpdateState.canUpdate = backendUpdateState.plugins.some(plugin => plugin.updateSupported && !plugin.isUpToDate && !plugin.updating);
+        backendUpdateState.canUpdate = backendUpdateState.plugins.some(plugin => backendUpdateState.checkedPlugins.has(plugin.id) && plugin.updateSupported === true && plugin.isUpToDate === false && !plugin.updating);
+        if (!['loading', 'checking', 'updating', 'error'].includes(backendUpdateState.phase)) {
+            backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (backendUpdateState.canUpdate ? 'available' : (backendUpdateState.checkedPlugins.size ? 'latest' : 'idle'));
+        }
         const $status = $popup.find('.em-backend-update-status');
         $status.text(backendUpdateState.message).toggleClass('error', backendUpdateState.phase === 'error').toggleClass('update', backendUpdateState.canUpdate).toggleClass('restart', backendUpdateState.restartRequired);
-        $popup.find('.em-check-backend').prop('disabled', ['checking', 'updating'].includes(backendUpdateState.phase));
-        $popup.find('.em-update-backend').prop('hidden', !backendUpdateState.canUpdate).prop('disabled', backendUpdateState.phase === 'updating');
+        const busy = ['loading', 'checking', 'updating'].includes(backendUpdateState.phase);
+        $popup.find('.em-check-backend, .em-backend-refresh').prop('disabled', busy);
+        $popup.find('.em-update-backend').prop('hidden', !backendUpdateState.canUpdate).prop('disabled', backendUpdateState.batchUpdating || backendUpdateState.phase === 'updating');
         renderBackendPluginList($popup);
         renderBackendPanel($popup);
     }
 
     async function loadLegacyBackendPlugin() {
-        const data = await request(`${BACKEND_BASE}/version`, { method: 'GET' });
+        const data = await request(BACKEND_BASE + '/version', { method: 'GET' });
         return {
             id: 'extension-manager',
             name: '扩展管理器后端',
@@ -495,107 +653,225 @@
         };
     }
 
-    async function checkBackendUpdate($popup) {
-        if (backendUpdateState.phase === 'checking' || backendUpdateState.phase === 'updating') return backendUpdateState;
+    async function loadBackendPlugins($popup, options = {}) {
+        if (!options.force && backendUpdateState.plugins.length) {
+            renderBackendUpdate($popup);
+            return backendUpdateState.plugins;
+        }
         if (!state.backend.available) {
             await loadServerMeta();
             renderBackendState($popup);
-            if (!state.backend.available) {
-                backendUpdateState.phase = 'error';
-                backendUpdateState.message = '管理后端未连接，请先安装扩展管理器后端';
-                backendUpdateState.canUpdate = false;
-                renderBackendUpdate($popup);
-                return backendUpdateState;
-            }
         }
-        backendUpdateState.phase = 'checking';
-        backendUpdateState.message = '正在检测全部已安装后端插件';
-        backendUpdateState.restartRequired = false;
-        beginDetection($popup);
+        if (!state.backend.available) {
+            backendUpdateState.phase = 'error';
+            backendUpdateState.message = '管理后端未连接，请先安装扩展管理器后端';
+            renderBackendUpdate($popup);
+            return [];
+        }
+        backendUpdateState.phase = 'loading';
+        backendUpdateState.message = '正在读取已安装后端插件';
         renderBackendUpdate($popup);
         try {
             let plugins;
-            let legacy = false;
             try {
-                const data = await request(`${BACKEND_BASE}/plugins?checkUpdates=true`, { method: 'GET' });
+                const data = await request(BACKEND_BASE + '/plugins?checkUpdates=false', { method: 'GET' });
                 plugins = normalizeBackendPlugins(data.plugins);
             } catch (error) {
                 if (error?.status !== 404) throw error;
-                plugins = normalizeBackendPlugins([{ ...(await loadLegacyBackendPlugin()), legacy: true }]);
-                legacy = true;
+                plugins = normalizeBackendPlugins([{ ...(await loadLegacyBackendPlugin()), updateSupported: null, isUpToDate: null, legacy: true }]);
             }
             backendUpdateState.plugins = plugins;
-            backendUpdateState.canUpdate = plugins.some(plugin => plugin.updateSupported && !plugin.isUpToDate);
-            const unsupported = plugins.filter(plugin => !plugin.updateSupported).length;
-            const available = plugins.filter(plugin => plugin.updateSupported && !plugin.isUpToDate).length;
-            backendUpdateState.phase = available ? 'available' : 'latest';
-            backendUpdateState.message = legacy
-                ? '管理后端版本较旧；请先更新并手动重启，重启后即可管理其他后端插件'
-                : `已检测 ${plugins.length} 个后端插件${available ? `，${available} 个可更新` : '，均无可用更新'}${unsupported ? `，${unsupported} 个无法自动更新` : ''}`;
+            backendUpdateState.checkedPlugins.clear();
+            backendUpdateState.checkingPlugins.clear();
+            backendUpdateState.phase = 'idle';
+            backendUpdateState.message = '已读取 ' + plugins.length + ' 个后端插件，点击检测后查看更新';
         } catch (error) {
             backendUpdateState.phase = 'error';
-            backendUpdateState.canUpdate = false;
-            backendUpdateState.message = `后端插件检测失败：${error.message || error}`;
+            backendUpdateState.message = '读取后端插件失败：' + (error.message || error);
+        }
+        renderBackendUpdate($popup);
+        return backendUpdateState.plugins;
+    }
+
+    async function checkBackendPlugins(pluginIds, $popup) {
+        if (['loading', 'checking', 'updating'].includes(backendUpdateState.phase) || backendUpdateState.batchUpdating) return backendUpdateState;
+        if (!backendUpdateState.plugins.length) await loadBackendPlugins($popup);
+        const existing = new Set(backendUpdateState.plugins.map(plugin => plugin.id));
+        const ids = Array.from(new Set(pluginIds || [])).filter(id => existing.has(id));
+        if (!ids.length) {
+            if (window.toastr) toastr.info('请选择需要检测的后端插件');
+            return backendUpdateState;
+        }
+        backendUpdateState.phase = 'checking';
+        backendUpdateState.message = '正在检测后端插件 0 / ' + ids.length;
+        beginDetection($popup);
+        renderBackendUpdate($popup);
+        let legacy = false;
+        try {
+            for (let index = 0; index < ids.length; index++) {
+                const pluginId = ids[index];
+                backendUpdateState.checkingPlugins.add(pluginId);
+                backendUpdateState.message = '正在检测后端插件 ' + (index + 1) + ' / ' + ids.length;
+                renderBackendUpdate($popup);
+                try {
+                    const data = await request(BACKEND_BASE + '/plugins/check', {
+                        method: 'POST',
+                        body: JSON.stringify({ pluginIds: [pluginId] }),
+                    });
+                    const checked = mergeBackendPlugins(data.plugins);
+                    if (!checked.length) {
+                        const plugin = backendUpdateState.plugins.find(item => item.id === pluginId);
+                        if (plugin) {
+                            plugin.error = '后端插件未找到';
+                            plugin.updateSupported = false;
+                            plugin.isUpToDate = null;
+                        }
+                    }
+                    backendUpdateState.checkedPlugins.add(pluginId);
+                } catch (error) {
+                    if (error?.status === 404) {
+                        const data = await request(BACKEND_BASE + '/plugins?checkUpdates=true', { method: 'GET' });
+                        backendUpdateState.plugins = normalizeBackendPlugins(data.plugins);
+                        backendUpdateState.plugins.forEach(plugin => backendUpdateState.checkedPlugins.add(plugin.id));
+                        legacy = true;
+                        break;
+                    }
+                    const plugin = backendUpdateState.plugins.find(item => item.id === pluginId);
+                    if (plugin) {
+                        plugin.error = error.message || String(error);
+                        plugin.updateSupported = false;
+                        plugin.isUpToDate = null;
+                    }
+                    backendUpdateState.checkedPlugins.add(pluginId);
+                } finally {
+                    backendUpdateState.checkingPlugins.delete(pluginId);
+                    renderBackendUpdate($popup);
+                }
+            }
+            const detected = backendUpdateState.plugins.filter(plugin => backendUpdateState.checkedPlugins.has(plugin.id));
+            const available = detected.filter(plugin => plugin.updateSupported === true && plugin.isUpToDate === false).length;
+            const unsupported = detected.filter(plugin => plugin.updateSupported === false).length;
+            backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (available ? 'available' : 'latest');
+            backendUpdateState.message = legacy
+                ? '管理后端版本较旧；请先更新并手动重启，重启后可多选检测'
+                : '已检测 ' + ids.length + ' 个后端插件' + (available ? '，' + available + ' 个可更新' : '，没有可用更新') + (unsupported ? '，' + unsupported + ' 个无法自动更新' : '');
+        } catch (error) {
+            backendUpdateState.phase = 'error';
+            backendUpdateState.message = '后端插件检测失败：' + (error.message || error);
         } finally {
+            backendUpdateState.checkingPlugins.clear();
             renderBackendUpdate($popup);
             finishDetection($popup);
         }
         return backendUpdateState;
     }
 
+    async function checkBackendUpdate($popup) {
+        await loadBackendPlugins($popup);
+        return checkBackendPlugins(backendUpdateState.plugins.map(plugin => plugin.id), $popup);
+    }
+
+    async function checkSelectedBackendPlugins($popup) {
+        return checkBackendPlugins(Array.from(backendUpdateState.selectedPlugins), $popup);
+    }
+
     async function updateBackendPlugin(pluginId, $popup, options = {}) {
         const plugin = backendUpdateState.plugins.find(item => item.id === pluginId);
-        if (!plugin || plugin.updating || !plugin.updateSupported || plugin.isUpToDate || (backendUpdateState.phase === 'updating' && !options.batch)) return false;
+        if (!plugin || plugin.updating || !backendUpdateState.checkedPlugins.has(pluginId) || plugin.updateSupported !== true || plugin.isUpToDate !== false || (backendUpdateState.phase === 'updating' && !options.batch)) return false;
         plugin.updating = true;
         backendUpdateState.phase = 'updating';
-        backendUpdateState.message = `正在更新：${plugin.name}`;
+        backendUpdateState.message = '正在更新：' + plugin.name;
         renderBackendUpdate($popup);
         try {
-            const data = await request(plugin.legacy ? `${BACKEND_BASE}/update` : `${BACKEND_BASE}/plugins/update`, {
+            const data = await request(plugin.legacy ? BACKEND_BASE + '/update' : BACKEND_BASE + '/plugins/update', {
                 method: 'POST',
                 body: plugin.legacy ? '{}' : JSON.stringify({ pluginId: plugin.id }),
             });
             const next = normalizeBackendPlugins([{ ...plugin, ...(data.plugin || {}), version: data.plugin?.version || data.version || plugin.version, isUpToDate: true, updating: false, restartRequired: data.restartRequired === true }])[0];
             Object.assign(plugin, next);
+            backendUpdateState.checkedPlugins.add(plugin.id);
             backendUpdateState.restartRequired = backendUpdateState.restartRequired || data.restartRequired === true;
-            backendUpdateState.message = data.message || `${plugin.name} 已更新，请手动重启 Termux 中的 SillyTavern`;
+            backendUpdateState.message = data.updated === false ? plugin.name + ' 已是最新版本' : plugin.name + ' 已更新，请手动重启 SillyTavern';
             if (!options.quiet && window.toastr) toastr[data.restartRequired === true ? 'warning' : 'success'](backendUpdateState.message);
             return true;
         } catch (error) {
             plugin.error = error.message || String(error);
-            backendUpdateState.message = `${plugin.name} 更新失败：${plugin.error}`;
+            backendUpdateState.message = plugin.name + ' 更新失败：' + plugin.error;
             if (!options.quiet && window.toastr) toastr.error(backendUpdateState.message);
             return false;
         } finally {
             plugin.updating = false;
-            backendUpdateState.canUpdate = backendUpdateState.plugins.some(item => item.updateSupported && !item.isUpToDate);
-            if (!backendUpdateState.batchUpdating) backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (backendUpdateState.canUpdate ? 'available' : 'latest');
+            if (!backendUpdateState.batchUpdating) {
+                const remaining = backendUpdateState.plugins.some(item => backendUpdateState.checkedPlugins.has(item.id) && item.updateSupported === true && item.isUpToDate === false);
+                backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (remaining ? 'available' : 'latest');
+            }
+            renderBackendUpdate($popup);
+        }
+    }
+
+    async function updateBackendPluginsSequentially(pluginIds, $popup) {
+        if (backendUpdateState.batchUpdating || ['checking', 'loading'].includes(backendUpdateState.phase)) return;
+        const targets = Array.from(new Set(pluginIds || [])).map(id => backendUpdateState.plugins.find(plugin => plugin.id === id)).filter(plugin => plugin && backendUpdateState.checkedPlugins.has(plugin.id) && plugin.updateSupported === true && plugin.isUpToDate === false);
+        if (!targets.length) {
+            if (window.toastr) toastr.info('检测完成，所选后端插件暂无可更新项');
+            return;
+        }
+        backendUpdateState.batchUpdating = true;
+        backendUpdateState.phase = 'updating';
+        renderBackendUpdate($popup);
+        let completed = 0;
+        try {
+            for (let index = 0; index < targets.length; index++) {
+                const plugin = targets[index];
+                backendUpdateState.message = '正在更新后端插件 ' + (index + 1) + ' / ' + targets.length + '：' + plugin.name;
+                renderBackendUpdate($popup);
+                $popup.find('.em-backend-batch-status').text(backendUpdateState.message);
+                if (await updateBackendPlugin(plugin.id, $popup, { quiet: true, batch: true })) completed += 1;
+            }
+            backendUpdateState.message = backendUpdateState.restartRequired
+                ? '后端更新完成：' + completed + ' / ' + targets.length + '。请手动重启 SillyTavern'
+                : '后端检查完成：' + completed + ' / ' + targets.length + '，无需重启';
+            if (window.toastr) toastr[backendUpdateState.restartRequired ? 'warning' : 'success'](backendUpdateState.message);
+        } finally {
+            backendUpdateState.batchUpdating = false;
+            const remaining = backendUpdateState.plugins.some(plugin => backendUpdateState.checkedPlugins.has(plugin.id) && plugin.updateSupported === true && plugin.isUpToDate === false);
+            backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (remaining ? 'available' : 'latest');
             renderBackendUpdate($popup);
         }
     }
 
     async function updateBackend($popup) {
-        if (!backendUpdateState.canUpdate || backendUpdateState.batchUpdating) return;
-        const targets = backendUpdateState.plugins.filter(plugin => plugin.updateSupported && !plugin.isUpToDate).map(plugin => plugin.id);
-        backendUpdateState.batchUpdating = true;
-        backendUpdateState.phase = 'updating';
-        let completed = 0;
-        try {
-            for (let index = 0; index < targets.length; index++) {
-                backendUpdateState.message = `正在更新后端插件 ${index + 1} / ${targets.length}`;
-                renderBackendUpdate($popup);
-                if (await updateBackendPlugin(targets[index], $popup, { quiet: true, batch: true })) completed += 1;
-            }
-            backendUpdateState.message = backendUpdateState.restartRequired
-                ? `后端更新完成：${completed} / ${targets.length}。请手动重启 Termux 中的 SillyTavern`
-                : `后端检查完成：${completed} / ${targets.length}，无需重启`;
-            if (window.toastr) toastr[backendUpdateState.restartRequired ? 'warning' : 'success'](backendUpdateState.message);
-        } finally {
-            backendUpdateState.batchUpdating = false;
-            backendUpdateState.canUpdate = backendUpdateState.plugins.some(plugin => plugin.updateSupported && !plugin.isUpToDate);
-            backendUpdateState.phase = backendUpdateState.restartRequired ? 'restart' : (backendUpdateState.canUpdate ? 'available' : 'latest');
-            renderBackendUpdate($popup);
+        return updateBackendPluginsSequentially(backendUpdateState.plugins.map(plugin => plugin.id), $popup);
+    }
+
+    async function updateSelectedBackendPlugins($popup) {
+        const selected = backendUpdateState.plugins.filter(plugin => backendUpdateState.selectedPlugins.has(plugin.id));
+        const undetected = selected.filter(plugin => !backendUpdateState.checkedPlugins.has(plugin.id));
+        if (undetected.length) {
+            if (window.toastr) toastr.warning('还有 ' + undetected.length + ' 个选中后端插件未检测，请先检测选中');
+            return;
         }
+        return updateBackendPluginsSequentially(selected.map(plugin => plugin.id), $popup);
+    }
+
+    function applyBackendMetadata() {
+        backendUpdateState.plugins = normalizeBackendPlugins(backendUpdateState.plugins.map(plugin => ({
+            ...plugin,
+            name: plugin.nativeName,
+            description: plugin.nativeDescription,
+        })));
+    }
+
+    async function updateBackendPluginGroups(assignments) {
+        const nextMeta = { ...state.backendMeta };
+        Object.entries(assignments || {}).forEach(([pluginId, group]) => {
+            const current = nextMeta[pluginId] && typeof nextMeta[pluginId] === 'object' ? nextMeta[pluginId] : {};
+            const item = { name: String(current.name || ''), note: String(current.note || ''), category: String(group || '').trim() };
+            if (item.name || item.note || item.category) nextMeta[pluginId] = item;
+            else delete nextMeta[pluginId];
+        });
+        await saveBackendMeta(nextMeta);
+        applyBackendMetadata();
     }
 
     function waitForManagerMenu(timeout = 8000) {
@@ -1043,9 +1319,11 @@
         if (!$status.length) return;
         $status.toggleClass('ok', state.backend.available).toggleClass('error', !state.backend.available);
         const pluginCount = backendUpdateState.plugins.length;
-        $status.text(state.backend.available
-            ? `管理后端已连接${state.backend.version ? ` · v${state.backend.version}` : ''}${pluginCount ? ` · 已发现 ${pluginCount} 个后端插件` : ''}`
-            : '管理后端未连接');
+        const connected = '管理后端已连接' +
+            (state.backend.version ? ' · v' + state.backend.version : '') +
+            (pluginCount ? ' · 已发现 ' + pluginCount + ' 个后端插件' : '') +
+            (state.backend.supportsBackendMeta ? '' : ' · 更新并重启后可保存分组');
+        $status.text(state.backend.available ? connected : '管理后端未连接');
         $popup.find('.em-backend-install-help').prop('hidden', state.backend.available);
     }
 
@@ -1334,7 +1612,8 @@
                 flex: 1 1 280px;
             }
             #st-extension-manager-overlay .em-search-field > i { color: var(--em-accent); opacity: .7; }
-            #st-extension-manager-overlay .em-search {
+            #st-extension-manager-overlay .em-search,
+            #st-extension-manager-overlay .em-backend-search {
                 min-width: 0;
                 width: 100%;
                 height: 34px;
@@ -1345,7 +1624,8 @@
                 color: inherit;
             }
             #st-extension-manager-overlay .em-select,
-            #st-extension-manager-overlay .em-category-filter {
+            #st-extension-manager-overlay .em-category-filter,
+            #st-extension-manager-overlay .em-backend-category-filter {
                 width: 112px;
                 min-height: 36px;
                 padding: 7px 8px;
@@ -1355,7 +1635,8 @@
                 color: inherit;
             }
             #st-extension-manager-overlay .em-count { font-size: .76em; opacity: .62; white-space: nowrap; }
-            #st-extension-manager-overlay .em-multi-toggle.active {
+            #st-extension-manager-overlay .em-multi-toggle.active,
+            #st-extension-manager-overlay .em-backend-multi-toggle.active {
                 border-color: var(--em-accent);
                 background: color-mix(in srgb, var(--em-accent) 12%, var(--em-control));
                 color: var(--em-accent);
@@ -1679,7 +1960,9 @@
             #st-extension-manager-overlay .em-backend-install-help p { margin: 0 0 7px; }
             #st-extension-manager-overlay .em-backend-install-help p:last-child { margin-bottom: 0; }
             #st-extension-manager-overlay .em-backend-install-help pre { margin: 7px 0; padding: 8px; overflow-x: auto; border-radius: 5px; background: rgba(0, 0, 0, .07); font: .9em/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
-            #st-extension-manager-overlay .em-backend-plugin-list { min-width: 0; border-top: 1px solid var(--em-line-soft); border-bottom: 1px solid var(--em-line-soft); }
+            #st-extension-manager-overlay .em-backend-plugin-list { min-width: 0; }
+            #st-extension-manager-overlay .em-backend-install-help { margin-top: 12px; }
+            #st-extension-manager-overlay .em-backend-update-note { margin-top: 10px; }
             #st-extension-manager-overlay .em-backend-plugin-row { min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--em-line-soft); }
             #st-extension-manager-overlay .em-backend-plugin-row:last-child { border-bottom: 0; }
             #st-extension-manager-overlay .em-backend-plugin-main { min-width: 0; display: flex; align-items: center; gap: 10px; }
@@ -1698,7 +1981,8 @@
             #st-extension-manager-overlay .em-backend-update-note { margin: 0; font-size: .76em; line-height: 1.45; opacity: .68; }
             #st-extension-manager-overlay .em-update-self[hidden],
             #st-extension-manager-overlay .em-update-backend[hidden] { display: none; }
-            #st-extension-manager-overlay .em-batch-update-status:not(:empty) { padding-top: 8px; font-size: .76em; opacity: .68; }
+            #st-extension-manager-overlay .em-batch-update-status:not(:empty),
+            #st-extension-manager-overlay .em-backend-batch-status:not(:empty) { padding-top: 8px; font-size: .76em; opacity: .68; }
             #st-extension-manager-overlay .em-empty {
                 min-height: 210px;
                 display: flex;
@@ -1757,10 +2041,12 @@
                 #st-extension-manager-overlay .em-backend-plugin-actions { width: 100%; justify-content: space-between; }
                 #st-extension-manager-overlay .em-group-cards { padding-left: 0; }
                 #st-extension-manager-overlay .em-group-picker { margin-left: 0; }
-                #st-extension-manager-overlay .em-list-head { top: -10px; margin: -1px -1px 9px; padding: 1px 1px 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }\n                #st-extension-manager-overlay .em-count { display: none; }
+                #st-extension-manager-overlay .em-list-head { top: -10px; margin: -1px -1px 9px; padding: 1px 1px 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
+                #st-extension-manager-overlay .em-count { display: none; }
                 #st-extension-manager-overlay .em-search-field { grid-column: 1 / -1; min-width: 0; }
                 #st-extension-manager-overlay .em-select,
-                #st-extension-manager-overlay .em-category-filter { width: 100%; min-width: 0; }
+                #st-extension-manager-overlay .em-category-filter,
+                #st-extension-manager-overlay .em-backend-category-filter { width: 100%; min-width: 0; }
                 #st-extension-manager-overlay .em-card { padding: 10px; grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
                 #st-extension-manager-overlay .em-card-icon,
                 #st-extension-manager-overlay .em-card-choice { width: 34px; height: 34px; }
@@ -1867,13 +2153,13 @@
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = readStoredNightMode();
         $(`#${FLOAT_ID}`).remove();
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展的可用更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 已安装后端插件</h3><p class="em-backend-panel-state">正在检测管理后端连接</p><p class="em-backend-update-status">点击按钮检测全部已安装后端插件</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div><div class="em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待检测</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端，请在“安装扩展”页选择 Termux 或 Windows 并复制对应的一键命令。</p><p>命令会启用 <code>enableServerPlugins: true</code>，但不会自动重启 SillyTavern。</p></div><p class="em-backend-update-note">会检测 <code>SillyTavern/plugins</code> 下所有已安装后端插件；更新只执行对应目录的 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></div></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><div class="em-platform-switch" role="group" aria-label="选择运行环境"><button type="button" class="em-platform-option active" data-platform="termux" aria-pressed="true"><i class="fa-solid fa-mobile-screen"></i><span>Termux</span></button><button type="button" class="em-platform-option" data-platform="windows" aria-pressed="false"><i class="fa-solid fa-desktop"></i><span>Windows</span></button></div><pre class="em-backend-command">${escapeHtml(backendInstallCommand())}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制 Termux 一键命令</button><p class="em-install-status em-backend-install-note">请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展的可用更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-frontend-tools em-backend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件管理</strong><span class="em-backend-panel-state">正在检测管理后端连接</span></div><button type="button" class="em-action em-backend-refresh" title="重新读取" aria-label="重新读取后端插件"><i class="fa-solid fa-arrows-rotate"></i> 读取插件</button></div><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件更新</strong><span class="em-backend-update-status">读取后端插件后可检测更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-magnifying-glass"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-backend-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-backend-search" placeholder="搜索后端插件、分组或备注" aria-label="搜索后端插件"></div><select class="em-backend-category-filter" aria-label="按后端分组筛选"><option value="">全部分组</option></select><select class="em-select em-backend-sort" aria-label="后端插件排序方式"><option value="name">按名称</option><option value="status">按更新状态</option></select><span class="em-count em-backend-count"></span><button type="button" class="em-action em-backend-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-backend-batch-toolbar" hidden></div><div class="em-list em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待读取</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端，请在“安装扩展”页选择 Termux 或 Windows 并复制对应的一键命令。</p><p>命令会启用 <code>enableServerPlugins: true</code>，但不会自动重启 SillyTavern。</p></div><p class="em-backend-update-note">后端检测只查询固定插件目录中的 Git 仓库；更新按检测结果依次执行 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><div class="em-platform-switch" role="group" aria-label="选择运行环境"><button type="button" class="em-platform-option active" data-platform="termux" aria-pressed="true"><i class="fa-solid fa-mobile-screen"></i><span>Termux</span></button><button type="button" class="em-platform-option" data-platform="windows" aria-pressed="false"><i class="fa-solid fa-desktop"></i><span>Windows</span></button></div><pre class="em-backend-command">${escapeHtml(backendInstallCommand())}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制 Termux 一键命令</button><p class="em-install-status em-backend-install-note">请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div></div></section></main></div></div>`);
         const $float = $(`<button type="button" id="${FLOAT_ID}" class="em-float" title="点击展开扩展管理器，拖动调整位置" aria-label="点击展开扩展管理器，拖动调整位置" hidden><i class="em-float-state fa-solid fa-wand-magic-sparkles"></i></button>`);
         $('body').append($popup, $float);
         applyFloatingBallSize($popup);
         applyPanelTheme($popup, dark);
         const panelAbortController = new AbortController();
-        const close = () => { panelAbortController.abort(); state.minimized = false; state.selectionMode = false; state.selectedExtensions.clear(); state.groupPickerSelections.clear(); $float.remove(); $popup.fadeOut(180, () => $popup.remove()); };
+        const close = () => { panelAbortController.abort(); state.minimized = false; state.selectionMode = false; state.selectedExtensions.clear(); state.groupPickerSelections.clear(); backendUpdateState.selectionMode = false; backendUpdateState.selectedPlugins.clear(); backendUpdateState.groupPickerSelections.clear(); $float.remove(); $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
         $popup.on('keydown', e => { if (e.key === 'Escape') close(); });
         requestAnimationFrame(() => $popup.trigger('focus'));
@@ -1936,10 +2222,10 @@
         });
         window.addEventListener('resize', positionFloatingButton, { signal: panelAbortController.signal });
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); applyPanelTheme($popup, darkNow); storeNightMode(darkNow); });
-        $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void checkBackendUpdate($popup); });
-        $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
+        $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void loadBackendPlugins($popup); });
+        $popup.on('input', '.em-search:not(.em-backend-search)', function () { state.filter = $(this).val(); renderList($popup); });
         $popup.on('change', '.em-sort', function () { state.sort = $(this).val(); renderList($popup); });
-        $popup.on('change', '.em-category-filter', function () { state.category = $(this).val(); renderList($popup); });
+        $popup.on('change', '.em-category-filter:not(.em-backend-category-filter)', function () { state.category = $(this).val(); renderList($popup); });
         $popup.on('input', '.em-float-size', function () { state.settings = normalizeSettings({ ...state.settings, floatingBallSize: $(this).val() }); applyFloatingBallSize($popup); });
         $popup.on('change', '.em-float-size', async function () {
             try {
@@ -1953,7 +2239,7 @@
         $popup.on('click', '.em-group-toggle', function () { const group = $(this).data('group'); if (state.expandedGroups.has(group)) state.expandedGroups.delete(group); else state.expandedGroups.add(group); renderList($popup); });
         $popup.on('click', '.em-group-add', function () { const group = $(this).data('group'); state.groupPicker = group; state.groupPickerSelections.clear(); state.expandedGroups.add(group); renderList($popup); });
         $popup.on('click', '.em-group-cancel', function () { state.groupPicker = ''; state.groupPickerSelections.clear(); renderList($popup); });
-        $popup.on('change', '.em-group-choice input', function () { const folder = $(this).data('folder'); if (this.checked) state.groupPickerSelections.add(folder); else state.groupPickerSelections.delete(folder); });
+        $popup.on('change', '.em-group-choice input[data-folder]', function () { const folder = $(this).data('folder'); if (this.checked) state.groupPickerSelections.add(folder); else state.groupPickerSelections.delete(folder); });
         $popup.on('click', '.em-group-add-save', async function () {
             const group = String($(this).data('group') || '');
             if (!state.groupPickerSelections.size) { if (window.toastr) toastr.info('请选择要加入分组的扩展'); return; }
@@ -1998,6 +2284,163 @@
         $popup.on('click', '.em-refresh', () => loadExtensions($popup));
         $popup.on('click', '.em-check-self', () => checkSelfUpdate($popup, panelAbortController.signal));
         $popup.on('click', '.em-update-self', () => updateSelf($popup));
+        $popup.on('input', '.em-backend-search', function () {
+            backendUpdateState.filter = String($(this).val() || '');
+            renderBackendPluginList($popup);
+        });
+        $popup.on('change', '.em-backend-category-filter', function () {
+            backendUpdateState.category = String($(this).val() || '');
+            renderBackendPluginList($popup);
+        });
+        $popup.on('change', '.em-backend-sort', function () {
+            backendUpdateState.sort = String($(this).val() || 'name');
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-backend-refresh', () => loadBackendPlugins($popup, { force: true }));
+        $popup.on('click', '.em-backend-multi-toggle', function () {
+            backendUpdateState.selectionMode = !backendUpdateState.selectionMode;
+            if (!backendUpdateState.selectionMode) backendUpdateState.selectedPlugins.clear();
+            renderBackendPluginList($popup);
+        });
+        $popup.on('change', '.em-backend-card .em-card-choice input', function () {
+            const pluginId = String($(this).attr('data-plugin-id') || '');
+            if (this.checked) backendUpdateState.selectedPlugins.add(pluginId);
+            else backendUpdateState.selectedPlugins.delete(pluginId);
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-backend-select-visible', function () {
+            filteredBackendPlugins().forEach(plugin => backendUpdateState.selectedPlugins.add(plugin.id));
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-backend-clear-selection', function () {
+            backendUpdateState.selectedPlugins.clear();
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-check-selected-backend', () => checkSelectedBackendPlugins($popup));
+        $popup.on('click', '.em-update-selected-backend', () => updateSelectedBackendPlugins($popup));
+        $popup.on('click', '.em-check-backend-plugin', function () {
+            void checkBackendPlugins([String($(this).attr('data-plugin-id') || '')], $popup);
+        });
+        $popup.on('click', '.em-backend-edit', function () {
+            const pluginId = String($(this).attr('data-plugin-id') || '');
+            $popup.find('.em-backend-editor').filter(function () { return String($(this).attr('data-backend-editor') || '') === pluginId; }).prop('hidden', false);
+        });
+        $popup.on('click', '.em-backend-save-meta', async function () {
+            const pluginId = String($(this).attr('data-plugin-id') || '');
+            const plugin = backendUpdateState.plugins.find(item => item.id === pluginId);
+            if (!plugin) return;
+            const editor = $popup.find('.em-backend-editor').filter(function () { return String($(this).attr('data-backend-editor') || '') === pluginId; });
+            const categoryInput = String(editor.find('.em-backend-category-input').val() || '').trim();
+            if (categoryInput === '内置') { if (window.toastr) toastr.error('“内置”是系统保留分组'); return; }
+            const category = categoryInput === '未分组' ? '' : categoryInput;
+            const nextMeta = { ...state.backendMeta, [pluginId]: { name: String(editor.find('.em-backend-name-input').val() || '').trim(), note: String(editor.find('.em-backend-note-input').val() || '').trim(), category } };
+            const $button = $(this).prop('disabled', true);
+            try {
+                await saveBackendMeta(nextMeta);
+                applyBackendMetadata();
+                backendUpdateState.expandedGroups.add(backendGroupOf(backendUpdateState.plugins.find(item => item.id === pluginId)));
+                renderBackendPluginList($popup);
+                if (window.toastr) toastr.success('后端插件资料已保存');
+            } catch (error) {
+                $button.prop('disabled', false);
+                if (window.toastr) toastr.error('保存失败：' + (error.message || error));
+            }
+        });
+        $popup.on('click', '.em-backend-batch-group-save', async function () {
+            const selected = backendUpdateState.plugins.filter(plugin => backendUpdateState.selectedPlugins.has(plugin.id));
+            if (!selected.length) {
+                if (window.toastr) toastr.info('请先选择要分组的后端插件');
+                return;
+            }
+            let group = String($popup.find('.em-backend-batch-group').val() || '');
+            if (group === '__new__') group = String(window.prompt('新分组名称') || '').trim();
+            if (group === '内置') { if (window.toastr) toastr.error('“内置”是系统保留分组'); return; }
+            if (group === '__new__' || ($popup.find('.em-backend-batch-group').val() === '__new__' && !group)) return;
+            const assignments = Object.fromEntries(selected.map(plugin => [plugin.id, group === '未分组' ? '' : group]));
+            const $button = $(this).prop('disabled', true);
+            try {
+                await updateBackendPluginGroups(assignments);
+                backendUpdateState.expandedGroups.add(group || '未分组');
+                renderBackendPluginList($popup);
+                if (window.toastr) toastr.success(group ? '已将 ' + selected.length + ' 个后端插件加入分组：' + group : '已将 ' + selected.length + ' 个后端插件移至未分组');
+            } catch (error) {
+                $button.prop('disabled', false);
+                if (window.toastr) toastr.error('批量分组失败：' + (error.message || error));
+            }
+        });
+        $popup.on('click', '.em-backend-group-toggle', function () {
+            const group = String($(this).attr('data-group') || '');
+            if (backendUpdateState.expandedGroups.has(group)) backendUpdateState.expandedGroups.delete(group);
+            else backendUpdateState.expandedGroups.add(group);
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-backend-group-add', function () {
+            const group = String($(this).attr('data-group') || '');
+            backendUpdateState.groupPicker = group;
+            backendUpdateState.groupPickerSelections.clear();
+            backendUpdateState.expandedGroups.add(group);
+            renderBackendPluginList($popup);
+        });
+        $popup.on('click', '.em-backend-group-cancel', function () {
+            backendUpdateState.groupPicker = '';
+            backendUpdateState.groupPickerSelections.clear();
+            renderBackendPluginList($popup);
+        });
+        $popup.on('change', '.em-backend-group-choice input', function () {
+            const pluginId = String($(this).attr('data-plugin-id') || '');
+            if (this.checked) backendUpdateState.groupPickerSelections.add(pluginId);
+            else backendUpdateState.groupPickerSelections.delete(pluginId);
+        });
+        $popup.on('click', '.em-backend-group-add-save', async function () {
+            const group = String($(this).attr('data-group') || '');
+            if (!backendUpdateState.groupPickerSelections.size) {
+                if (window.toastr) toastr.info('请选择要加入分组的后端插件');
+                return;
+            }
+            const assignments = Object.fromEntries(Array.from(backendUpdateState.groupPickerSelections, pluginId => [pluginId, group]));
+            try {
+                await updateBackendPluginGroups(assignments);
+                backendUpdateState.groupPicker = '';
+                backendUpdateState.groupPickerSelections.clear();
+                backendUpdateState.expandedGroups.add(group);
+                renderBackendPluginList($popup);
+                if (window.toastr) toastr.success('已添加到后端分组：' + group);
+            } catch (error) {
+                if (window.toastr) toastr.error('添加失败：' + (error.message || error));
+            }
+        });
+        $popup.on('click', '.em-backend-group-rename', async function () {
+            const group = String($(this).attr('data-group') || '');
+            const nextGroup = String(window.prompt('新的分组名称', group) || '').trim();
+            if (!nextGroup || nextGroup === group) return;
+            if (['内置', '未分组'].includes(nextGroup)) { if (window.toastr) toastr.error('该名称为系统保留分组'); return; }
+            const assignments = Object.fromEntries(backendUpdateState.plugins.filter(plugin => backendGroupOf(plugin) === group).map(plugin => [plugin.id, nextGroup]));
+            try {
+                await updateBackendPluginGroups(assignments);
+                backendUpdateState.expandedGroups.delete(group);
+                backendUpdateState.expandedGroups.add(nextGroup);
+                if (backendUpdateState.category === group) backendUpdateState.category = nextGroup;
+                renderBackendPluginList($popup);
+                if (window.toastr) toastr.success('后端分组已重命名为：' + nextGroup);
+            } catch (error) {
+                if (window.toastr) toastr.error('重命名失败：' + (error.message || error));
+            }
+        });
+        $popup.on('click', '.em-backend-group-dissolve', async function () {
+            const group = String($(this).attr('data-group') || '');
+            if (!window.confirm('解散后端分组“' + group + '”？插件本身不会被修改。')) return;
+            const assignments = Object.fromEntries(backendUpdateState.plugins.filter(plugin => backendGroupOf(plugin) === group).map(plugin => [plugin.id, '']));
+            try {
+                await updateBackendPluginGroups(assignments);
+                backendUpdateState.expandedGroups.delete(group);
+                backendUpdateState.expandedGroups.add('未分组');
+                if (backendUpdateState.category === group) backendUpdateState.category = '';
+                renderBackendPluginList($popup);
+                if (window.toastr) toastr.success('后端分组已解散：' + group);
+            } catch (error) {
+                if (window.toastr) toastr.error('解散失败：' + (error.message || error));
+            }
+        });
         $popup.on('click', '.em-check-backend', () => checkBackendUpdate($popup));
         $popup.on('click', '.em-update-backend', () => updateBackend($popup));
         $popup.on('click', '.em-update-backend-plugin', function () { void updateBackendPlugin(String($(this).attr('data-plugin-id') || ''), $popup); });
@@ -2007,7 +2450,7 @@
             if (!state.selectionMode) state.selectedExtensions.clear();
             renderList($popup);
         });
-        $popup.on('change', '.em-card-choice input', function () {
+        $popup.on('change', '.em-card-choice input[data-folder]', function () {
             const folder = String($(this).data('folder') || '');
             if (this.checked) state.selectedExtensions.add(folder);
             else state.selectedExtensions.delete(folder);

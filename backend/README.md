@@ -47,6 +47,7 @@ http://你的酒馆地址/api/plugins/extension-manager/status
 - `GET /api/plugins/extension-manager/version`：检测管理后端自身的 Git 仓库更新。
 - `POST /api/plugins/extension-manager/update`：更新管理后端自身；仅管理员可调用。
 - `GET /api/plugins/extension-manager/plugins?checkUpdates=true`：列出并检测 `SillyTavern/plugins` 下全部后端插件。
+- `POST /api/plugins/extension-manager/plugins/check`：按 `pluginIds` 检测指定后端插件。
 - `POST /api/plugins/extension-manager/plugins/update`：按 `pluginId` 更新单个后端插件；仅管理员可调用。
 - `GET /api/plugins/extension-manager/data`：读取当前酒馆账号的数据。
 - `PUT /api/plugins/extension-manager/data`：保存当前酒馆账号的数据。
@@ -61,7 +62,7 @@ SillyTavern/plugins/extension-manager/data/
 
 账号名称会经过哈希处理后作为文件名。写入过程会先创建临时文件，再原子替换主文件；上一次内容保存在同名 `.bak` 文件中。主文件无法解析时会自动读取 `.bak`。
 
-悬浮条高度等界面设置保存在同一账号文件的 `settings` 字段中，兼容字段 `floatingBallSize` 会限制在 `25-56` 像素。
+前端扩展资料保存在 `extensions`，后端插件的中文名、备注和分组保存在 `backendPlugins`。悬浮球大小保存在同一账号文件的 `settings` 字段中，并限制在 `25-56` 像素。
 
 可以通过环境变量修改数据目录：
 

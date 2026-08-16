@@ -48,7 +48,7 @@ function userFile(req) {
 }
 
 function emptyData() {
-    return { schemaVersion: 2, updatedAt: null, extensions: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
+    return { schemaVersion: 3, updatedAt: null, extensions: {}, backendPlugins: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
 }
 
 async function readJson(filePath, fallback) {
@@ -65,22 +65,27 @@ function normalizeSettings(value) {
     return { floatingBallSize };
 }
 
-function normalizeData(value) {
-    const source = isObject(value) ? value : {};
-    const extensions = {};
-    const entries = isObject(source.extensions) ? Object.entries(source.extensions) : [];
-    entries.slice(0, MAX_EXTENSIONS).forEach(([folder, item]) => {
-        const safeFolder = String(folder || '').trim();
-        if (!/^[^/\\\0]{1,180}$/.test(safeFolder) || !isObject(item)) return;
+function normalizeMetadataMap(value) {
+    const result = {};
+    const entries = isObject(value) ? Object.entries(value) : [];
+    entries.slice(0, MAX_EXTENSIONS).forEach(([key, item]) => {
+        const safeKey = String(key || '').trim();
+        if (!/^[^/\\\0]{1,180}$/.test(safeKey) || !isObject(item)) return;
         const name = String(item.name || '').trim().slice(0, MAX_NAME_LENGTH);
         const note = String(item.note || '').trim().slice(0, MAX_NOTE_LENGTH);
         const category = String(item.category || '').trim().slice(0, MAX_CATEGORY_LENGTH);
-        if (name || note || category) extensions[safeFolder] = { name, note, category };
+        if (name || note || category) result[safeKey] = { name, note, category };
     });
+    return result;
+}
+
+function normalizeData(value) {
+    const source = isObject(value) ? value : {};
     return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
-        extensions,
+        extensions: normalizeMetadataMap(source.extensions),
+        backendPlugins: normalizeMetadataMap(source.backendPlugins),
         settings: normalizeSettings(source.settings),
     };
 }
@@ -248,10 +253,11 @@ async function inspectServerPlugin(pluginId, directory, checkUpdates) {
     }
 }
 
-async function scanServerPlugins(checkUpdates = true) {
+async function scanServerPlugins(checkUpdates = true, pluginIds = null) {
+    const requested = Array.isArray(pluginIds) ? new Set(pluginIds) : null;
     const entries = await fsp.readdir(PLUGINS_DIR, { withFileTypes: true });
     const candidates = entries
-        .filter(entry => entry.isDirectory() && PLUGIN_ID_PATTERN.test(entry.name))
+        .filter(entry => entry.isDirectory() && PLUGIN_ID_PATTERN.test(entry.name) && (!requested || requested.has(entry.name)))
         .map(entry => ({ id: entry.name, directory: path.join(PLUGINS_DIR, entry.name) }));
     const plugins = await Promise.all(candidates.map(candidate => inspectServerPlugin(candidate.id, candidate.directory, checkUpdates)));
     return plugins.filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans') || a.id.localeCompare(b.id));
@@ -302,7 +308,7 @@ async function init(router) {
         try {
             const data = await readData(req);
             res.set('Cache-Control', 'no-store');
-            res.json({ ok: true, pluginId: info.id, version: packageInfo.version, schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length });
+            res.json({ ok: true, pluginId: info.id, version: packageInfo.version, schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length, backendPluginMetadataCount: Object.keys(data.backendPlugins).length });
         } catch (error) { sendError(res, 500, error.message); }
     });
 
@@ -340,7 +346,7 @@ async function init(router) {
                 shortCommitHash: result.after.currentCommitHash.slice(0, 7),
                 version: installedVersion,
                 restartRequired: updated,
-                message: updated ? '后端已更新，需要手动重启 Termux 中的 SillyTavern' : '后端已是最新版本',
+                message: updated ? '后端已更新，需要手动重启 SillyTavern' : '后端已是最新版本',
                 output: result.output,
             });
         } catch (error) {
@@ -359,6 +365,21 @@ async function init(router) {
         }
     });
 
+    router.post('/plugins/check', async (req, res) => {
+        if (!isObject(req.body) || !Array.isArray(req.body.pluginIds)) return sendError(res, 400, '需要 pluginIds 数组', 'invalid_body');
+        const pluginIds = Array.from(new Set(req.body.pluginIds.map(id => String(id || '').trim())));
+        if (!pluginIds.length || pluginIds.length > MAX_EXTENSIONS || pluginIds.some(id => !PLUGIN_ID_PATTERN.test(id))) {
+            return sendError(res, 400, '后端插件标识列表无效', 'invalid_plugin_ids');
+        }
+        try {
+            const plugins = await scanServerPlugins(true, pluginIds);
+            res.set('Cache-Control', 'no-store');
+            res.json({ ok: true, plugins, pluginCount: plugins.length });
+        } catch (error) {
+            sendError(res, 500, error.message, error.code || 'plugin_check_failed');
+        }
+    });
+
     router.post('/plugins/update', async (req, res) => {
         if (!isAdminRequest(req)) return sendError(res, 403, '只有酒馆管理员可以更新服务端插件', 'admin_required');
         if (!isObject(req.body)) return sendError(res, 400, '需要 JSON 对象', 'invalid_body');
@@ -372,7 +393,7 @@ async function init(router) {
                 updated: result.updated,
                 restartRequired: result.updated,
                 message: result.updated
-                    ? `${plugin.name} 已更新，请手动重启 Termux 中的 SillyTavern`
+                    ? `${plugin.name} 已更新，请手动重启 SillyTavern`
                     : `${plugin.name} 已是最新版本`,
                 output: result.output,
             });
