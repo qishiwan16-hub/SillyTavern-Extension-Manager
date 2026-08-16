@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.14.3';
+    const SCRIPT_VERSION = '1.14.4';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -1965,6 +1965,7 @@
             ? '请在 PowerShell 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。'
             : '请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。');
         $button.prop('disabled', state.backend.available);
+        $button.toggleClass('is-installed', state.backend.available);
         $button.html(state.backend.available
             ? '<i class="fa-solid fa-circle-check"></i> 管理后端已安装'
             : `<i class="fa-solid fa-terminal"></i> 复制${isWindows ? ' PowerShell' : ' Termux'} 一键命令`);
@@ -2062,7 +2063,8 @@
             }
 
             #st-extension-manager-overlay {
-                --em-accent: var(--SmartThemeQuoteColor, #376f91);
+                --em-accent: #2d6784;
+                --em-primary: #286987;
                 --em-panel: var(--SmartThemeBlurTintColor, rgba(248, 249, 250, .98));
                 --em-surface: rgba(255, 255, 255, .76);
                 --em-surface-strong: rgba(255, 255, 255, .94);
@@ -2563,7 +2565,7 @@
             #st-extension-manager-overlay .em-action:hover,
             #st-extension-manager-overlay .em-save-meta:hover { border-color: var(--em-accent); color: var(--em-accent); }
             #st-extension-manager-overlay .em-action.primary,
-            #st-extension-manager-overlay .em-save-meta.primary { border-color: var(--em-accent); background: var(--em-accent); color: #fff; }
+            #st-extension-manager-overlay .em-save-meta.primary { border-color: var(--em-primary); background: var(--em-primary); color: #fff; }
             #st-extension-manager-overlay .em-action.primary:hover,
             #st-extension-manager-overlay .em-save-meta.primary:hover { filter: brightness(1.08); color: #fff; }
             #st-extension-manager-overlay .em-action.muted { cursor: default; opacity: .48; }
@@ -2698,7 +2700,7 @@
                 font-size: .76em;
             }
             #st-extension-manager-overlay .em-platform-option + .em-platform-option { border-left: 1px solid var(--em-line); }
-            #st-extension-manager-overlay .em-platform-option.active { background: var(--em-accent); color: #fff; font-weight: 700; }
+            #st-extension-manager-overlay .em-platform-option.active { background: var(--em-primary); color: #fff; font-weight: 700; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); }
             #st-extension-manager-overlay .em-backend-command {
                 max-height: 150px;
                 margin: 0;
@@ -2774,12 +2776,15 @@
             #st-extension-manager-overlay .em-box.em-dark .em-action,
             #st-extension-manager-overlay .em-box.em-dark .em-save-meta { color: #eef0f2; background: var(--em-control); border-color: var(--em-line); }
             #st-extension-manager-overlay .em-box.em-dark .em-action.primary,
-            #st-extension-manager-overlay .em-box.em-dark .em-save-meta.primary { color: #fff; background: var(--em-accent); border-color: var(--em-accent); }
+            #st-extension-manager-overlay .em-box.em-dark .em-save-meta.primary { color: #fff; background: var(--em-primary); border-color: var(--em-primary); }
             #st-extension-manager-overlay .em-box.em-dark .em-platform-option { color: #eef0f2; }
             #st-extension-manager-overlay .em-box.em-dark .em-platform-option.active { color: #fff; }
+            #st-extension-manager-overlay .em-box:not(.em-dark) .em-copy-backend-command.is-installed.primary:disabled { background: #e3e9ee; border-color: #aab6c1; color: #26323d; opacity: 1; cursor: default; filter: none; }
+            #st-extension-manager-overlay .em-box.em-dark .em-copy-backend-command.is-installed.primary:disabled { background: #343c46; border-color: #687482; color: #f5f7f9; opacity: 1; cursor: default; filter: none; }
             #st-extension-manager-overlay .em-empty i { font-size: 1.8em; }
 
             #st-extension-manager-overlay .em-box.em-dark {
+                --em-accent: #72b7d3;
                 --em-panel: rgba(27, 30, 35, .98);
                 --em-surface: rgba(255, 255, 255, .055);
                 --em-surface-strong: rgba(255, 255, 255, .085);
@@ -2889,16 +2894,16 @@
                 max-height: 56px !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                border: 1px solid rgba(255, 255, 255, .42) !important;
+                border: 2px solid rgba(255, 255, 255, .92) !important;
                 border-radius: 50% !important;
-                background: var(--em-accent) !important;
-                box-shadow: 0 4px 16px rgba(8, 14, 22, .34) !important;
+                background: #245f7b !important;
+                box-shadow: 0 0 0 2px rgba(9, 18, 25, .42), 0 5px 16px rgba(8, 14, 22, .38) !important;
                 color: #fff !important;
                 display: grid !important;
                 place-items: center;
                 box-sizing: border-box;
                 transform: none !important;
-                opacity: .9 !important;
+                opacity: 1 !important;
                 visibility: visible !important;
                 pointer-events: auto !important;
                 cursor: grab;
@@ -2909,11 +2914,14 @@
                 transition: opacity .14s ease, box-shadow .14s ease;
             }
             #st-extension-manager-float .em-float-state {
+                color: #fff !important;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, .42);
                 font-size: clamp(11px, calc(var(--em-float-size, 34px) * .38), 19px);
                 pointer-events: none;
             }
             #st-extension-manager-float:hover,
             #st-extension-manager-float:focus-visible {
+                background: #1d526b !important;
                 opacity: 1 !important;
                 box-shadow: 0 6px 20px rgba(8, 14, 22, .42) !important;
                 outline: 2px solid rgba(255, 255, 255, .78);
