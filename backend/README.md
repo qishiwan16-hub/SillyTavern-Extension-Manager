@@ -1,6 +1,6 @@
 # SillyTavern 扩展管理器后端
 
-为“扩展管理器”保存中文名、备注、分组和界面设置等资料。数据按酒馆账号写入服务端 JSON 文件，不使用浏览器 localStorage、IndexedDB 或其他浏览器持久化。
+为“扩展管理器”保存中文名、备注、分组、更新白名单和界面设置等资料。数据按酒馆账号写入服务端 JSON 文件，不使用浏览器 localStorage、IndexedDB 或其他浏览器持久化。
 
 ## 安装
 
@@ -48,7 +48,7 @@ http://你的酒馆地址/api/plugins/extension-manager/status
 - `POST /api/plugins/extension-manager/update`：更新管理后端自身；仅管理员可调用。
 - `GET /api/plugins/extension-manager/plugins?checkUpdates=true`：列出并检测 `SillyTavern/plugins` 下全部后端插件。
 - `POST /api/plugins/extension-manager/plugins/check`：按 `pluginIds` 检测指定后端插件。
-- `POST /api/plugins/extension-manager/plugins/update`：按 `pluginId` 更新单个后端插件；仅管理员可调用。
+- `POST /api/plugins/extension-manager/plugins/update`：按 `pluginId` 更新单个后端插件；仅管理员可调用，白名单项会被拒绝。
 - `GET /api/plugins/extension-manager/data`：读取当前酒馆账号的数据。
 - `PUT /api/plugins/extension-manager/data`：保存当前酒馆账号的数据。
 
@@ -62,7 +62,7 @@ SillyTavern/plugins/extension-manager/data/
 
 账号名称会经过哈希处理后作为文件名。写入过程会先创建临时文件，再原子替换主文件；上一次内容保存在同名 `.bak` 文件中。主文件无法解析时会自动读取 `.bak`。
 
-前端扩展资料保存在 `extensions`，后端插件的中文名、备注和分组保存在 `backendPlugins`。悬浮球大小保存在同一账号文件的 `settings` 字段中，并限制在 `25-56` 像素。
+前端扩展资料保存在 `extensions`，后端插件的中文名、备注和分组保存在 `backendPlugins`。不参与检测和更新的前后端插件保存在 `whitelist.frontend` 与 `whitelist.backend`。悬浮球大小保存在同一账号文件的 `settings` 字段中，并限制在 `25-56` 像素。
 
 可以通过环境变量修改数据目录：
 

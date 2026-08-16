@@ -48,7 +48,7 @@ function userFile(req) {
 }
 
 function emptyData() {
-    return { schemaVersion: 3, updatedAt: null, extensions: {}, backendPlugins: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
+    return { schemaVersion: 4, updatedAt: null, extensions: {}, backendPlugins: {}, whitelist: { frontend: [], backend: [] }, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
 }
 
 async function readJson(filePath, fallback) {
@@ -79,13 +79,26 @@ function normalizeMetadataMap(value) {
     return result;
 }
 
+function normalizeWhitelist(value) {
+    const source = isObject(value) ? value : {};
+    const normalizeList = (items, pattern) => Array.from(new Set((Array.isArray(items) ? items : [])
+        .slice(0, MAX_EXTENSIONS)
+        .map(item => String(item || '').trim())
+        .filter(item => pattern.test(item))));
+    return {
+        frontend: normalizeList(source.frontend, /^[^/\\\0]{1,180}$/),
+        backend: normalizeList(source.backend, PLUGIN_ID_PATTERN),
+    };
+}
+
 function normalizeData(value) {
     const source = isObject(value) ? value : {};
     return {
-        schemaVersion: 3,
+        schemaVersion: 4,
         updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
         extensions: normalizeMetadataMap(source.extensions),
         backendPlugins: normalizeMetadataMap(source.backendPlugins),
+        whitelist: normalizeWhitelist(source.whitelist),
         settings: normalizeSettings(source.settings),
     };
 }
@@ -308,12 +321,17 @@ async function init(router) {
         try {
             const data = await readData(req);
             res.set('Cache-Control', 'no-store');
-            res.json({ ok: true, pluginId: info.id, version: packageInfo.version, schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length, backendPluginMetadataCount: Object.keys(data.backendPlugins).length });
+            res.json({ ok: true, pluginId: info.id, version: packageInfo.version, schemaVersion: data.schemaVersion, storage: 'server', extensionCount: Object.keys(data.extensions).length, backendPluginMetadataCount: Object.keys(data.backendPlugins).length, whitelistCount: data.whitelist.frontend.length + data.whitelist.backend.length });
         } catch (error) { sendError(res, 500, error.message); }
     });
 
     router.get('/version', async (req, res) => {
         try {
+            const data = await readData(req);
+            if (data.whitelist.backend.includes(info.id)) {
+                res.set('Cache-Control', 'no-store');
+                return res.json({ ok: true, version: packageInfo.version, ignored: true, updateSupported: false, isUpToDate: true });
+            }
             const git = await getGitInfo(true);
             res.set('Cache-Control', 'no-store');
             res.json({ ok: true, version: packageInfo.version, ...git });
@@ -327,6 +345,8 @@ async function init(router) {
     router.post('/update', async (req, res) => {
         if (!isAdminRequest(req)) return sendError(res, 403, '只有酒馆管理员可以更新服务端插件', 'admin_required');
         try {
+            const data = await readData(req);
+            if (data.whitelist.backend.includes(info.id)) return sendError(res, 409, '扩展管理器后端已加入白名单', 'plugin_whitelisted');
             const result = await enqueueUpdate(async () => {
                 const before = await getGitInfo(true);
                 if (before.isUpToDate) return { before, after: before, output: 'Already up to date.' };
@@ -357,7 +377,17 @@ async function init(router) {
     router.get('/plugins', async (req, res) => {
         try {
             const checkUpdates = String(req.query && req.query.checkUpdates || 'true').toLowerCase() !== 'false';
-            const plugins = await scanServerPlugins(checkUpdates);
+            let plugins;
+            if (checkUpdates) {
+                const data = await readData(req);
+                const ignored = new Set(data.whitelist.backend);
+                const installed = await scanServerPlugins(false);
+                const checked = await scanServerPlugins(true, installed.filter(plugin => !ignored.has(plugin.id)).map(plugin => plugin.id));
+                const checkedById = new Map(checked.map(plugin => [plugin.id, plugin]));
+                plugins = installed.map(plugin => ignored.has(plugin.id) ? { ...plugin, ignored: true } : (checkedById.get(plugin.id) || plugin));
+            } else {
+                plugins = await scanServerPlugins(false);
+            }
             res.set('Cache-Control', 'no-store');
             res.json({ ok: true, plugins, pluginCount: plugins.length });
         } catch (error) {
@@ -372,9 +402,12 @@ async function init(router) {
             return sendError(res, 400, '后端插件标识列表无效', 'invalid_plugin_ids');
         }
         try {
-            const plugins = await scanServerPlugins(true, pluginIds);
+            const data = await readData(req);
+            const ignoredIds = pluginIds.filter(id => data.whitelist.backend.includes(id));
+            const targets = pluginIds.filter(id => !data.whitelist.backend.includes(id));
+            const plugins = targets.length ? await scanServerPlugins(true, targets) : [];
             res.set('Cache-Control', 'no-store');
-            res.json({ ok: true, plugins, pluginCount: plugins.length });
+            res.json({ ok: true, plugins, pluginCount: plugins.length, ignoredIds });
         } catch (error) {
             sendError(res, 500, error.message, error.code || 'plugin_check_failed');
         }
@@ -385,6 +418,8 @@ async function init(router) {
         if (!isObject(req.body)) return sendError(res, 400, '需要 JSON 对象', 'invalid_body');
         const pluginId = String(req.body.pluginId || req.body.id || '').trim();
         try {
+            const data = await readData(req);
+            if (data.whitelist.backend.includes(pluginId)) return sendError(res, 409, '该后端插件已加入白名单', 'plugin_whitelisted');
             const result = await enqueueUpdate(() => updateServerPlugin(pluginId));
             const plugin = await readServerPlugin(result.target.id, result.target.directory);
             res.json({
@@ -414,7 +449,11 @@ async function init(router) {
         if (!isObject(req.body)) return sendError(res, 400, '需要 JSON 对象', 'invalid_body');
         try {
             const input = isObject(req.body.data) ? req.body.data : req.body;
-            const data = await enqueueWrite(() => writeData(req, input));
+            const data = await enqueueWrite(async () => {
+                if (Object.prototype.hasOwnProperty.call(input, 'whitelist')) return writeData(req, input);
+                const current = await readData(req);
+                return writeData(req, { ...input, whitelist: current.whitelist });
+            });
             res.json({ ok: true, data });
         } catch (error) {
             sendError(res, error.code === 'metadata_too_large' ? 413 : 500, error.message, error.code || 'storage_error');
