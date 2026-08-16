@@ -4,18 +4,17 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.10.0';
+    const SCRIPT_VERSION = '1.11.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
     const FLOAT_ID = 'st-extension-manager-float';
     const BACKEND_BASE = '/api/plugins/extension-manager';
     const BACKEND_REPOSITORY_URL = 'https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git';
-    const BACKEND_INSTALL_COMMAND = `pkg install git -y
-cd ~/SillyTavern
-mkdir -p plugins
-if [ ! -d plugins/extension-manager/.git ]; then git clone ${BACKEND_REPOSITORY_URL} plugins/extension-manager; fi
-sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config.yaml`;
+    const BACKEND_INSTALL_COMMANDS = Object.freeze({
+        termux: `pkg install git -y && cd ~/SillyTavern && mkdir -p plugins && ( [ -d plugins/extension-manager/.git ] || git clone ${BACKEND_REPOSITORY_URL} plugins/extension-manager ) && sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config.yaml`,
+        windows: `$ErrorActionPreference='Stop'; $git=(Get-Command git -ErrorAction SilentlyContinue).Source; if (-not $git) { winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements; $git="$env:ProgramFiles\\Git\\cmd\\git.exe" }; if (-not (Test-Path $git)) { throw 'Git 安装失败，请先安装 Git for Windows' }; Set-Location "$HOME\\SillyTavern"; New-Item -ItemType Directory -Force "plugins" | Out-Null; if (-not (Test-Path "plugins\\extension-manager\\.git")) { & $git clone ${BACKEND_REPOSITORY_URL} "plugins\\extension-manager" }; (Get-Content "config.yaml" -Raw) -replace '(?m)^\\s*enableServerPlugins:.*$', 'enableServerPlugins: true' | Set-Content "config.yaml" -Encoding UTF8`,
+    });
     const EXTENSION_DEFAULT_FOLDER = 'SillyTavern-Extension-Manager';
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
@@ -25,7 +24,7 @@ sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), checkingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', selectionMode: false, batchUpdating: false, batchToggling: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backend: { available: false, error: '', version: '' } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), checkingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', selectionMode: false, batchUpdating: false, batchToggling: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backendInstallPlatform: 'termux', backend: { available: false, error: '', version: '' } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
     const backendUpdateState = { phase: 'idle', message: '点击按钮检测全部已安装后端插件', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false };
     let extensionApiPromise = null;
@@ -33,6 +32,7 @@ sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
 
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
+    const backendInstallCommand = () => BACKEND_INSTALL_COMMANDS[state.backendInstallPlatform] || BACKEND_INSTALL_COMMANDS.termux;
 
     function readStoredNightMode() {
         try { return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark'; }
@@ -982,10 +982,19 @@ sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config
         const $button = $popup.find('.em-copy-backend-command');
         const $status = $popup.find('.em-manager-backend-status');
         if (!$button.length) return;
+        const isWindows = state.backendInstallPlatform === 'windows';
+        $popup.find('.em-platform-option').each(function () {
+            const active = String($(this).data('platform')) === state.backendInstallPlatform;
+            $(this).toggleClass('active', active).attr('aria-pressed', active ? 'true' : 'false');
+        });
+        $popup.find('.em-backend-command').text(backendInstallCommand());
+        $popup.find('.em-backend-install-note').text(isWindows
+            ? '请在 PowerShell 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。'
+            : '请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。');
         $button.prop('disabled', state.backend.available);
         $button.html(state.backend.available
             ? '<i class="fa-solid fa-circle-check"></i> 管理后端已安装'
-            : '<i class="fa-solid fa-terminal"></i> 复制一键安装命令');
+            : `<i class="fa-solid fa-terminal"></i> 复制${isWindows ? ' PowerShell' : ' Termux'} 一键命令`);
         $status.removeClass('error').toggleClass('ok', state.backend.available).text(state.backend.available
             ? `已连接扩展管理器后端${state.backend.version ? ` v${state.backend.version}` : ''}`
             : '尚未连接扩展管理器后端');
@@ -1609,6 +1618,33 @@ sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config
             #st-extension-manager-overlay .em-install-status.error { color: #b94e55; opacity: 1; }
             #st-extension-manager-overlay .em-install-backend-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: .8em; }
             #st-extension-manager-overlay .em-manager-backend-status { text-align: right; opacity: .66; }
+            #st-extension-manager-overlay .em-platform-switch {
+                width: 100%;
+                min-width: 0;
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                border: 1px solid var(--em-line);
+                border-radius: 6px;
+                overflow: hidden;
+                background: var(--em-control);
+            }
+            #st-extension-manager-overlay .em-platform-option {
+                min-width: 0;
+                min-height: 36px;
+                padding: 7px 9px;
+                border: 0;
+                border-radius: 0;
+                background: transparent;
+                color: inherit;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                cursor: pointer;
+                font-size: .76em;
+            }
+            #st-extension-manager-overlay .em-platform-option + .em-platform-option { border-left: 1px solid var(--em-line); }
+            #st-extension-manager-overlay .em-platform-option.active { background: var(--em-accent); color: #fff; font-weight: 700; }
             #st-extension-manager-overlay .em-backend-command {
                 max-height: 150px;
                 margin: 0;
@@ -1831,8 +1867,7 @@ sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = readStoredNightMode();
         $(`#${FLOAT_ID}`).remove();
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展的可用更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 已安装后端插件</h3><p class="em-backend-panel-state">正在检测管理后端连接</p><p class="em-backend-update-status">点击按钮检测全部已安装后端插件</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div><div class="em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待检测</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端。请先在 Termux 中安装管理后端：</p><pre>cd ~/SillyTavern/plugins
-git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">会检测 <code>SillyTavern/plugins</code> 下所有已安装后端插件；更新只执行对应目录的 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></div></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><pre class="em-backend-command">${escapeHtml(BACKEND_INSTALL_COMMAND)}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制一键安装命令</button><p class="em-install-status">命令执行后不会自动重启，请手动重启 Termux 中的 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展的可用更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 已安装后端插件</h3><p class="em-backend-panel-state">正在检测管理后端连接</p><p class="em-backend-update-status">点击按钮检测全部已安装后端插件</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div><div class="em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待检测</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端，请在“安装扩展”页选择 Termux 或 Windows 并复制对应的一键命令。</p><p>命令会启用 <code>enableServerPlugins: true</code>，但不会自动重启 SillyTavern。</p></div><p class="em-backend-update-note">会检测 <code>SillyTavern/plugins</code> 下所有已安装后端插件；更新只执行对应目录的 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></div></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><div class="em-platform-switch" role="group" aria-label="选择运行环境"><button type="button" class="em-platform-option active" data-platform="termux" aria-pressed="true"><i class="fa-solid fa-mobile-screen"></i><span>Termux</span></button><button type="button" class="em-platform-option" data-platform="windows" aria-pressed="false"><i class="fa-solid fa-desktop"></i><span>Windows</span></button></div><pre class="em-backend-command">${escapeHtml(backendInstallCommand())}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制 Termux 一键命令</button><p class="em-install-status em-backend-install-note">请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div></div></section></main></div></div>`);
         const $float = $(`<button type="button" id="${FLOAT_ID}" class="em-float" title="点击展开扩展管理器，拖动调整位置" aria-label="点击展开扩展管理器，拖动调整位置" hidden><i class="em-float-state fa-solid fa-wand-magic-sparkles"></i></button>`);
         $('body').append($popup, $float);
         applyFloatingBallSize($popup);
@@ -2015,11 +2050,18 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
         $popup.on('click', '.em-check-selected', () => checkSelected($popup));
         $popup.on('click', '.em-update-selected', () => updateSelectedSequentially($popup));
         $popup.on('click', '.em-install-frontend', () => installFrontendExtension($popup));
+        $popup.on('click', '.em-platform-option', function () {
+            const platform = String($(this).data('platform') || 'termux');
+            if (!Object.prototype.hasOwnProperty.call(BACKEND_INSTALL_COMMANDS, platform)) return;
+            state.backendInstallPlatform = platform;
+            renderInstallPanel($popup);
+        });
         $popup.on('click', '.em-copy-backend-command', async function () {
             try {
-                await copyText(BACKEND_INSTALL_COMMAND);
+                await copyText(backendInstallCommand());
                 $popup.find('.em-manager-backend-status').removeClass('error').addClass('ok').text('安装命令已复制');
-                if (window.toastr) toastr.success('已复制，请粘贴到 Termux 执行');
+                const target = state.backendInstallPlatform === 'windows' ? 'PowerShell' : 'Termux';
+                if (window.toastr) toastr.success(`已复制，请粘贴到 ${target} 执行`);
             } catch (error) {
                 $popup.find('.em-manager-backend-status').removeClass('ok').addClass('error').text(`复制失败：${error.message || error}`);
             }

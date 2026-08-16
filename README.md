@@ -12,7 +12,7 @@
 - 扩展管理器本体支持自动检测、手动检查和更新后热加载。
 - 后端支持面板检测和安全的 `git pull --ff-only` 更新，完成后只提示手动重启 Termux，不会自动重启酒馆。
 - 检测期间可以收纳为不遮挡正文的临时悬浮球，大小可在 `25-56px` 之间调整。
-- 安装页支持通过 Git 地址安装并动态加载前端扩展，也可一键复制扩展管理器后端的 Termux 安装命令。
+- 安装页支持通过 Git 地址安装并动态加载前端扩展，也可选择 Termux 或 Windows，一键复制对应的单行后端安装命令。
 - 可多选扩展进行分组、检测、顺序热更新以及批量启用或禁用，不刷新浏览器。
 - 启用或禁用扩展调用酒馆原生接口，并按酒馆要求刷新页面。
 - 扩展按标签形成文件夹式分组，支持添加扩展、重命名和解散；内置扩展自动归入“内置”文件夹。
@@ -44,22 +44,23 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager.git
 https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend
 ```
 
-先停止 SillyTavern，然后打开 Termux。默认安装在 `~/SillyTavern` 时执行：
+安装页会根据所选运行环境生成单行命令。浏览器不能在管理后端尚未安装时安全地执行系统命令，因此需要复制到对应终端执行。
+
+Termux 默认安装在 `~/SillyTavern` 时执行：
 
 ```bash
-pkg install git -y
-cd ~/SillyTavern/plugins
-git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager
-cd ..
+pkg install git -y && cd ~/SillyTavern && mkdir -p plugins && ( [ -d plugins/extension-manager/.git ] || git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git plugins/extension-manager ) && sed -i 's/^[[:space:]]*enableServerPlugins:.*/enableServerPlugins: true/' config.yaml
 ```
 
 如果 SillyTavern 不在默认目录，把 `~/SillyTavern` 换成实际安装路径。
 
-打开 SillyTavern 的 `config.yaml`，确保启用服务端插件：
+Windows 默认安装在 `%USERPROFILE%\SillyTavern` 时，在 PowerShell 中执行：
 
-```yaml
-enableServerPlugins: true
+```powershell
+$ErrorActionPreference='Stop'; $git=(Get-Command git -ErrorAction SilentlyContinue).Source; if (-not $git) { winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements; $git="$env:ProgramFiles\Git\cmd\git.exe" }; if (-not (Test-Path $git)) { throw 'Git 安装失败，请先安装 Git for Windows' }; Set-Location "$HOME\SillyTavern"; New-Item -ItemType Directory -Force "plugins" | Out-Null; if (-not (Test-Path "plugins\extension-manager\.git")) { & $git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git "plugins\extension-manager" }; (Get-Content "config.yaml" -Raw) -replace '(?m)^\s*enableServerPlugins:.*$', 'enableServerPlugins: true' | Set-Content "config.yaml" -Encoding UTF8
 ```
+
+如果 SillyTavern 不在默认目录，把 `$HOME\SillyTavern` 换成实际安装路径。两套命令都会安装或复用管理后端，并把 `enableServerPlugins` 设为 `true`；都不会停止或重启 SillyTavern，执行完后需要用户自行重启。
 
 重新启动 SillyTavern。浏览器访问下面的地址进行验证：
 
@@ -115,4 +116,4 @@ git pull --ff-only
 - `manifest.json`：酒馆扩展清单。
 - `backend/`：后端源码镜像；实际安装建议使用独立后端仓库。
 
-“安装扩展”页面集中提供前端 Git 扩展安装和扩展管理器后端的 Termux 安装命令；“后端管理”页面负责检测、展示和更新所有已安装的服务端插件。
+“安装扩展”页面集中提供前端 Git 扩展安装，以及 Termux 和 Windows 对应的扩展管理器后端单行安装命令；“后端管理”页面负责检测、展示和更新所有已安装的服务端插件。
