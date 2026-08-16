@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.7.0';
+    const SCRIPT_VERSION = '1.7.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -224,7 +224,11 @@
         state.minimized = true;
         $popup.addClass('em-minimized').attr('aria-modal', 'false').find('.em-box').attr('hidden', true);
         $popup.find('.em-minimize').attr('aria-expanded', 'false');
-        $popup.find('.em-float').attr('aria-expanded', 'false');
+        $popup.find('.em-float').prop('hidden', false).attr('aria-expanded', 'false').css({
+            display: 'grid',
+            visibility: 'visible',
+            pointerEvents: 'auto',
+        });
         renderFloatingButton($popup);
         requestAnimationFrame(() => $popup.find('.em-float').trigger('focus'));
     }
@@ -233,7 +237,11 @@
         state.minimized = false;
         $popup.removeClass('em-minimized').attr('aria-modal', 'true').find('.em-box').removeAttr('hidden');
         $popup.find('.em-minimize').attr('aria-expanded', 'true');
-        $popup.find('.em-float').attr('aria-expanded', 'true');
+        $popup.find('.em-float').prop('hidden', true).attr('aria-expanded', 'true').css({
+            display: '',
+            visibility: '',
+            pointerEvents: '',
+        });
         requestAnimationFrame(() => $popup.trigger('focus'));
     }
 
@@ -1321,37 +1329,45 @@
                 #st-extension-manager-overlay .em-content { padding: 10px 14px; }
             }
 
-            #st-extension-manager-overlay .em-float { display: none; }
+            #st-extension-manager-overlay .em-float,
+            #st-extension-manager-overlay .em-float[hidden] { display: none !important; }
             #st-extension-manager-overlay.em-minimized {
                 pointer-events: none;
                 background: transparent;
                 backdrop-filter: none;
                 -webkit-backdrop-filter: none;
             }
-            #st-extension-manager-overlay.em-minimized .em-float {
-                position: fixed;
-                right: max(8px, env(safe-area-inset-right));
-                bottom: max(8px, env(safe-area-inset-bottom));
-                width: var(--em-float-size, 34px);
-                height: var(--em-float-size, 34px);
-                min-width: var(--em-float-size, 34px);
-                min-height: var(--em-float-size, 34px);
-                padding: 0;
+            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]) {
+                position: fixed !important;
+                inset: auto max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) auto !important;
+                z-index: 2147483001 !important;
+                display: grid !important;
+                visibility: visible !important;
+                width: var(--em-float-size, 34px) !important;
+                height: var(--em-float-size, 34px) !important;
+                min-width: var(--em-float-size, 34px) !important;
+                min-height: var(--em-float-size, 34px) !important;
+                max-width: var(--em-float-size, 34px) !important;
+                max-height: var(--em-float-size, 34px) !important;
+                margin: 0 !important;
+                padding: 0 !important;
                 border: 1px solid rgba(255, 255, 255, .26);
                 border-radius: 50%;
                 background: var(--em-accent);
                 box-shadow: 0 3px 10px rgba(8, 14, 22, .2);
                 color: #fff;
-                display: grid;
                 place-items: center;
-                pointer-events: auto;
+                box-sizing: border-box;
+                transform: none !important;
+                pointer-events: auto !important;
                 cursor: pointer;
                 font-size: .78em;
-                opacity: .62;
+                line-height: 1;
+                opacity: .82;
                 transition: opacity .14s ease, box-shadow .14s ease;
             }
-            #st-extension-manager-overlay.em-minimized .em-float:hover,
-            #st-extension-manager-overlay.em-minimized .em-float:focus-visible {
+            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]):hover,
+            #st-extension-manager-overlay.em-minimized .em-float:not([hidden]):focus-visible {
                 opacity: 1;
                 box-shadow: 0 4px 14px rgba(8, 14, 22, .28);
             }
@@ -1368,7 +1384,7 @@
         const dark = false;
         const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展并选择更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><div class="em-update-selection"><div class="em-update-empty">点击“检测更新”开始检查</div></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
 git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">更新只执行后端目录的 <code>git pull --ff-only</code>，不会停止或重启 Termux/SillyTavern；更新完成后请手动重启。</p></div></section></main></div></div>`);
-        $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器" aria-expanded="false"><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
+        $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器" aria-expanded="false" hidden><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
         $('body').append($popup);
         applyFloatingBallSize($popup);
         const panelAbortController = new AbortController();
