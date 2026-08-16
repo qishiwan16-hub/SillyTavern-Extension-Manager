@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.5.0';
+    const SCRIPT_VERSION = '1.5.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -225,7 +225,9 @@
 
     function getInstalledExtensionName() {
         const scripts = Array.from(document.scripts || []);
-        const source = INITIAL_SCRIPT_URL || scripts.find(script => /\/scripts\/extensions\/(?:third-party\/)?[^/]+\/index\.js(?:[?#]|$)/i.test(script.src || ''))?.src || '';
+        const escapedDefaultFolder = EXTENSION_DEFAULT_FOLDER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const managerPattern = new RegExp(`/scripts/extensions/(?:third-party/)?${escapedDefaultFolder}/index\\.js(?:[?#]|$)`, 'i');
+        const source = INITIAL_SCRIPT_URL || scripts.find(script => managerPattern.test(script.src || ''))?.src || '';
         const match = source.match(/\/scripts\/extensions\/(?:third-party\/)?([^/]+)\/index\.js(?:[?#]|$)/i);
         return match ? decodeURIComponent(match[1]) : EXTENSION_DEFAULT_FOLDER;
     }
@@ -390,7 +392,8 @@
             scripts.forEach(script => script.remove());
             await new Promise((resolve, reject) => {
                 const next = document.createElement('script');
-                next.type = 'module';
+                const current = scripts[0];
+                if (current?.type) next.type = current.type;
                 next.async = true;
                 next.src = url.href;
                 next.onload = resolve;
