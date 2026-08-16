@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.8.0';
+    const SCRIPT_VERSION = '1.9.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -14,11 +14,12 @@
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
     const THEME_STORAGE_KEY = 'st-extension-manager-theme';
+    const FLOAT_POSITION_STORAGE_KEY = 'st-extension-manager-float-position';
     const FLOATING_BALL_MIN = 25;
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), selectedExtensions: new Set(), expandedGroups: new Set(['内置', '未分组']), groupPicker: '', batchUpdating: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backend: { available: false, error: '', version: '' } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', selectionMode: false, batchUpdating: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backend: { available: false, error: '', version: '' } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
     const backendUpdateState = { phase: 'idle', message: '点击按钮检测全部已安装后端插件', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false };
     let extensionApiPromise = null;
@@ -34,6 +35,18 @@
 
     function storeNightMode(dark) {
         try { window.localStorage.setItem(THEME_STORAGE_KEY, dark ? 'dark' : 'light'); }
+        catch (error) {}
+    }
+
+    function readFloatingPosition() {
+        try {
+            const value = JSON.parse(window.localStorage.getItem(FLOAT_POSITION_STORAGE_KEY) || 'null');
+            return Number.isFinite(value?.left) && Number.isFinite(value?.top) ? value : null;
+        } catch (error) { return null; }
+    }
+
+    function storeFloatingPosition(left, top) {
+        try { window.localStorage.setItem(FLOAT_POSITION_STORAGE_KEY, JSON.stringify({ left: Math.round(left), top: Math.round(top) })); }
         catch (error) {}
     }
 
@@ -116,10 +129,20 @@
         $popup.find('.em-float-size-value').text(`${size}px`);
     }
 
-    function resetFloatingBarPosition() {
-        const bar = getFloatingBar()[0];
-        if (!bar) return;
-        ['left', 'top', 'right', 'bottom'].forEach(property => bar.style.removeProperty(property));
+    function positionFloatingButton() {
+        const button = getFloatingBar()[0];
+        if (!button) return;
+        const rect = button.getBoundingClientRect();
+        const size = rect.width || state.settings.floatingBallSize;
+        const saved = readFloatingPosition();
+        const defaultLeft = window.innerWidth - size - 16;
+        const defaultTop = window.innerHeight - size - 80;
+        const left = Math.min(Math.max(8, saved?.left ?? defaultLeft), Math.max(8, window.innerWidth - size - 8));
+        const top = Math.min(Math.max(8, saved?.top ?? defaultTop), Math.max(8, window.innerHeight - size - 8));
+        button.style.setProperty('left', `${left}px`, 'important');
+        button.style.setProperty('top', `${top}px`, 'important');
+        button.style.setProperty('right', 'auto', 'important');
+        button.style.setProperty('bottom', 'auto', 'important');
     }
 
     async function loadServerMeta() {
@@ -238,10 +261,10 @@
 
     function renderFloatingButton($popup) {
         const active = Number($popup.data('em-active-detections') || 0) > 0;
-        const $bar = getFloatingBar();
-        $bar.find('.em-float-state').attr('class', active ? 'em-float-state fa-solid fa-spinner fa-spin' : 'em-float-state fa-solid fa-grip-lines');
-        $bar.attr('title', active ? '正在检测更新，可拖动悬浮条' : '拖动悬浮条调整位置');
-        $bar.find('.em-float-restore').attr('title', active ? '正在检测更新，点击展开' : '展开扩展管理器');
+        const $button = getFloatingBar();
+        $button.find('.em-float-state').attr('class', active ? 'em-float-state fa-solid fa-spinner fa-spin' : 'em-float-state fa-solid fa-wand-magic-sparkles');
+        const title = active ? '正在检测更新；点击展开，拖动调整位置' : '点击展开扩展管理器，拖动调整位置';
+        $button.attr({ title, 'aria-label': title });
     }
 
     function beginDetection($popup) {
@@ -260,10 +283,13 @@
         state.minimized = true;
         $popup.addClass('em-minimized').attr('aria-modal', 'false').find('.em-box').attr('hidden', true);
         $popup.find('.em-minimize').attr('aria-expanded', 'false');
-        const $bar = getFloatingBar();
-        $bar.prop('hidden', false).css({ display: 'flex', visibility: 'visible', pointerEvents: 'auto' });
+        const $button = getFloatingBar();
+        $button.prop('hidden', false).css({ display: 'grid', visibility: 'visible', pointerEvents: 'auto' });
         renderFloatingButton($popup);
-        requestAnimationFrame(() => $bar.find('.em-float-restore').trigger('focus'));
+        requestAnimationFrame(() => {
+            positionFloatingButton();
+            $button.trigger('focus');
+        });
     }
 
     function restorePanel($popup) {
@@ -271,7 +297,6 @@
         $popup.removeClass('em-minimized').attr('aria-modal', 'true').find('.em-box').removeAttr('hidden');
         $popup.find('.em-minimize').attr('aria-expanded', 'true');
         getFloatingBar().prop('hidden', true).css({ display: '', visibility: '', pointerEvents: '' });
-        resetFloatingBarPosition();
         requestAnimationFrame(() => $popup.trigger('focus'));
     }
 
@@ -285,13 +310,12 @@
             state.extensions.filter(isExternal).forEach(extension => extension._checkPromise = checkOne(extension, controller.signal));
             await Promise.all(state.extensions.filter(isExternal).map(extension => extension._checkPromise));
             const availableExtensions = state.extensions.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
-            state.selectedUpdates = new Set(availableExtensions.map(folderOf));
             const message = availableExtensions.length ? `发现 ${availableExtensions.length} 个扩展可快速更新` : '其他扩展均为最新版本';
             if (!state.minimized && window.toastr) toastr.info(message);
         } finally {
             state.checking = false;
             renderList($popup);
-            renderUpdateSelection($popup);
+            renderBatchSelection($popup);
             finishDetection($popup);
         }
     }
@@ -669,34 +693,63 @@
             if (window.toastr) toastr.error(`${extension.displayName} 更新失败：${error.message || error}`);
         } finally {
             state.updating.delete(folder);
-            state.selectedUpdates.delete(folder);
-            renderList($popup);
-            if (!options.deferSelectionRender) renderUpdateSelection($popup);
+            if (!options.deferRender) renderList($popup);
+            if (!options.deferSelectionRender) renderBatchSelection($popup);
         }
         return success;
     }
 
-    async function updateSelectedSequentially($popup) {
-        if (state.batchUpdating) return;
-        const targets = state.extensions.filter(extension => state.selectedUpdates.has(folderOf(extension)) && state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
+    function selectedExternalExtensions() {
+        return state.extensions.filter(extension => state.selectedExtensions.has(folderOf(extension)) && isExternal(extension));
+    }
+
+    async function checkSelected($popup) {
+        if (state.checking || state.batchUpdating) return;
+        const targets = selectedExternalExtensions();
         if (!targets.length) {
-            if (window.toastr) toastr.info('请先选择需要更新的扩展');
+            if (window.toastr) toastr.info('请先选择需要检测的扩展');
+            return;
+        }
+        state.checking = true;
+        beginDetection($popup);
+        renderList($popup);
+        try {
+            await Promise.all(targets.map(extension => checkOne(extension)));
+            const available = targets.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false);
+            if (window.toastr) toastr.info(available.length ? `选中扩展中有 ${available.length} 个可更新` : '选中扩展均无可用更新');
+        } finally {
+            state.checking = false;
+            renderList($popup);
+            finishDetection($popup);
+        }
+    }
+
+    async function updateSelectedSequentially($popup) {
+        if (state.batchUpdating || state.checking) return;
+        const selected = selectedExternalExtensions();
+        const undetected = selected.filter(extension => !state.updates.has(folderOf(extension)));
+        if (undetected.length) {
+            if (window.toastr) toastr.warning(`还有 ${undetected.length} 个选中扩展未检测，请先检测选中`);
+            return;
+        }
+        const targets = selected.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
+        if (!targets.length) {
+            if (window.toastr) toastr.info('检测完成，选中扩展暂无可更新项');
             return;
         }
         state.batchUpdating = true;
+        renderBatchSelection($popup);
         const $status = $popup.find('.em-batch-update-status');
-        $popup.find('.em-update-selected, .em-update-choice').prop('disabled', true);
         let completed = 0;
         try {
             for (let index = 0; index < targets.length; index++) {
                 $status.text(`正在更新 ${index + 1} / ${targets.length}：${targets[index].displayName}`);
-                if (await updateOne(targets[index], $popup, { quiet: true, deferSelectionRender: true })) completed += 1;
+                if (await updateOne(targets[index], $popup, { quiet: true, deferRender: true, deferSelectionRender: true })) completed += 1;
             }
-            $status.text(`顺序更新完成：${completed} / ${targets.length}`);
-            if (window.toastr) toastr.success(`快速更新完成：${completed} / ${targets.length}`);
+            if (window.toastr) toastr.success(`批量更新完成：${completed} / ${targets.length}`);
         } finally {
             state.batchUpdating = false;
-            renderUpdateSelection($popup);
+            renderList($popup);
         }
     }
 
@@ -733,7 +786,7 @@
         const choices = candidates.length
             ? candidates.map(extension => {
                 const folder = folderOf(extension);
-                return `<label class="em-group-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.selectedExtensions.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(groupOf(extension))}</small></span></label>`;
+                return `<label class="em-group-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.groupPickerSelections.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(groupOf(extension))}</small></span></label>`;
             }).join('')
             : '<div class="em-group-picker-empty">没有可添加的扩展</div>';
         return `<div class="em-group-picker" data-group-picker="${escapeHtml(group)}"><div class="em-group-picker-list">${choices}</div><div class="em-group-picker-actions"><button type="button" class="em-action em-group-cancel"><i class="fa-solid fa-xmark"></i> 取消</button><button type="button" class="em-action primary em-group-add-save" data-group="${escapeHtml(group)}" ${candidates.length ? '' : 'disabled'}><i class="fa-solid fa-folder-plus"></i> 添加选中</button></div></div>`;
@@ -771,6 +824,7 @@
             : list.length ? names.map(name => renderGroup(name, groups.get(name))).join('') : '<div class="em-empty"><i class="fa-solid fa-puzzle-piece"></i><span>没有匹配的扩展</span></div>';
         $popup.find('#em-list').html(html);
         $popup.find('#em-count').text(`${list.length} / ${state.extensions.length}`);
+        renderBatchSelection($popup);
     }
 
     async function updateExtensionGroups(assignments) {
@@ -791,23 +845,27 @@
         });
     }
 
-    function quickUpdateExtensions() {
-        return state.extensions.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
-    }
+    function renderBatchSelection($popup) {
+        const $toolbar = $popup.find('.em-batch-toolbar');
+        const $toggle = $popup.find('.em-multi-toggle');
+        if (!$toolbar.length) return;
+        $toggle.toggleClass('active', state.selectionMode).attr('aria-pressed', String(state.selectionMode));
+        $toggle.find('span').text(state.selectionMode ? '退出多选' : '多选');
+        $toolbar.prop('hidden', !state.selectionMode);
+        if (!state.selectionMode) return;
 
-    function renderUpdateSelection($popup) {
-        const available = quickUpdateExtensions();
-        const $container = $popup.find('.em-update-selection');
-        if (!$container.length) return;
-        if (!available.length) {
-            $container.html('<div class="em-update-empty"><i class="fa-solid fa-check"></i> 暂无其他扩展需要更新</div>');
-            return;
-        }
-        const rows = available.map(extension => {
-            const folder = folderOf(extension);
-            return `<label class="em-update-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.selectedUpdates.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(folder)} · ${escapeHtml(groupOf(extension))}</small></span></label>`;
-        }).join('');
-        $container.html(`<div class="em-update-choice-list">${rows}</div><div class="em-update-actions"><button type="button" class="em-action em-select-all"><i class="fa-solid fa-list-check"></i> 全选</button><button type="button" class="em-action primary em-update-selected"><i class="fa-solid fa-bolt"></i> 快速更新选中</button></div><div class="em-batch-update-status"></div>`);
+        const selected = state.extensions.filter(extension => state.selectedExtensions.has(folderOf(extension)) && typeOf(extension) !== 'system');
+        const external = selected.filter(isExternal);
+        const detected = external.filter(extension => state.updates.has(folderOf(extension)));
+        const undetected = external.length - detected.length;
+        const available = external.filter(extension => state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
+        const customGroups = Array.from(new Set(state.extensions.map(groupOf).filter(group => !['内置', '未分组'].includes(group)))).sort((a, b) => a.localeCompare(b, 'zh-Hans'));
+        const groupOptions = ['<option value="">未分组</option>', ...customGroups.map(group => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`), '<option value="__new__">新建分组...</option>'].join('');
+        const updateDisabled = state.batchUpdating || state.checking || !available.length || undetected > 0;
+        const status = selected.length
+            ? `已选 ${selected.length} 个 · 已检测 ${detected.length} 个${available.length ? ` · 可更新 ${available.length} 个` : ''}${undetected ? ` · 未检测 ${undetected} 个` : ''}`
+            : '请选择扩展';
+        $toolbar.html(`<div class="em-batch-summary"><strong>批量操作</strong><span>${status}</span></div><div class="em-batch-controls"><button type="button" class="em-action em-select-visible"><i class="fa-solid fa-list-check"></i> 全选当前</button><button type="button" class="em-action em-clear-selection" ${selected.length ? '' : 'disabled'}><i class="fa-solid fa-xmark"></i> 清空</button><select class="em-batch-group" aria-label="目标分组">${groupOptions}</select><button type="button" class="em-action em-batch-group-save" ${selected.length ? '' : 'disabled'}><i class="fa-solid fa-folder-plus"></i> 分组</button><button type="button" class="em-action em-check-selected" ${external.length && !state.checking && !state.batchUpdating ? '' : 'disabled'}><i class="fa-solid fa-magnifying-glass"></i> 检测选中</button><button type="button" class="em-action primary em-update-selected" ${updateDisabled ? 'disabled' : ''} title="${undetected ? '请先检测全部选中扩展' : (available.length ? '更新检测到的新版本' : '没有检测到可用更新')}"><i class="fa-solid fa-cloud-arrow-down"></i> 更新选中</button></div><div class="em-batch-update-status"></div>`);
     }
 
     function renderCard(extension) {
@@ -824,8 +882,12 @@
         const groupInput = typeOf(extension) === 'system'
             ? '<input class="em-category-input" value="内置" disabled>'
             : `<input class="em-category-input" value="${escapeHtml(extension.category || '')}" maxlength="80" placeholder="输入名称即可形成分组文件夹">`;
-        return `<article class="em-card ${available ? 'is-update' : ''} ${extension.enabled ? '' : 'is-disabled'}">
-            <div class="em-card-icon"><i class="fa-solid fa-puzzle-piece"></i></div>
+        const selected = state.selectedExtensions.has(folder);
+        const leading = state.selectionMode && typeOf(extension) !== 'system'
+            ? `<label class="em-card-choice ${selected ? 'is-selected' : ''}" title="选择 ${escapeHtml(extension.displayName)}"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${selected ? 'checked' : ''}><i class="fa-solid fa-check"></i></label>`
+            : '<div class="em-card-icon"><i class="fa-solid fa-puzzle-piece"></i></div>';
+        return `<article class="em-card ${available ? 'is-update' : ''} ${extension.enabled ? '' : 'is-disabled'} ${selected ? 'is-selected' : ''}">
+            ${leading}
             <div class="em-card-body">
                 <div class="em-card-head"><div class="em-card-title">${escapeHtml(extension.displayName)} <span class="em-type">${escapeHtml(typeLabel)}</span>${group !== '未分组' ? ` <span class="em-category">${escapeHtml(group)}</span>` : ''}</div><span class="em-status ${available ? 'update' : ''}">${escapeHtml(status)}</span></div>
                 <div class="em-card-sub">${escapeHtml(folder)}${extension.version ? ` · v${escapeHtml(extension.version)}` : ''}${commit ? ` · ${escapeHtml(commit)}` : ''} · ${escapeHtml(branch)}</div>
@@ -1156,6 +1218,41 @@
                 color: inherit;
             }
             #st-extension-manager-overlay .em-count { font-size: .76em; opacity: .62; white-space: nowrap; }
+            #st-extension-manager-overlay .em-multi-toggle.active {
+                border-color: var(--em-accent);
+                background: color-mix(in srgb, var(--em-accent) 12%, var(--em-control));
+                color: var(--em-accent);
+            }
+            #st-extension-manager-overlay .em-batch-toolbar {
+                margin: -3px 0 12px;
+                padding: 10px;
+                border: 1px solid color-mix(in srgb, var(--em-accent) 30%, var(--em-line));
+                border-radius: 7px;
+                background: color-mix(in srgb, var(--em-accent) 7%, var(--em-surface));
+            }
+            #st-extension-manager-overlay .em-batch-toolbar[hidden] { display: none; }
+            #st-extension-manager-overlay .em-batch-summary {
+                min-width: 0;
+                margin-bottom: 8px;
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 10px;
+            }
+            #st-extension-manager-overlay .em-batch-summary strong { font-size: .82em; }
+            #st-extension-manager-overlay .em-batch-summary span { min-width: 0; font-size: .72em; opacity: .66; text-align: right; overflow-wrap: anywhere; }
+            #st-extension-manager-overlay .em-batch-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+            #st-extension-manager-overlay .em-batch-controls > * { flex: 1 1 105px; }
+            #st-extension-manager-overlay .em-batch-group {
+                min-width: 110px;
+                min-height: 32px;
+                padding: 6px 8px;
+                border: 1px solid var(--em-line);
+                border-radius: 6px;
+                background: var(--em-control);
+                color: inherit;
+                font-size: .76em;
+            }
 
             #st-extension-manager-overlay .em-list { display: flex; flex-direction: column; gap: 8px; }
             #st-extension-manager-overlay .em-group { min-width: 0; border-top: 1px solid var(--em-line); }
@@ -1201,6 +1298,34 @@
             }
             #st-extension-manager-overlay .em-card.is-update { border-left: 3px solid #c88628; }
             #st-extension-manager-overlay .em-card.is-disabled { opacity: .62; }
+            #st-extension-manager-overlay .em-card.is-selected {
+                border-color: color-mix(in srgb, var(--em-accent) 60%, transparent);
+                background: color-mix(in srgb, var(--em-accent) 9%, var(--em-surface));
+            }
+            #st-extension-manager-overlay .em-card-choice {
+                width: 40px;
+                height: 40px;
+                border: 1px solid color-mix(in srgb, var(--em-accent) 34%, transparent);
+                border-radius: 7px;
+                background: color-mix(in srgb, var(--em-accent) 9%, transparent);
+                position: relative;
+                display: grid;
+                place-items: center;
+                cursor: pointer;
+            }
+            #st-extension-manager-overlay .em-card-choice input {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                opacity: 0;
+                pointer-events: none;
+            }
+            #st-extension-manager-overlay .em-card-choice i { color: var(--em-accent); opacity: .28; }
+            #st-extension-manager-overlay .em-card-choice.is-selected {
+                border-color: var(--em-accent);
+                background: var(--em-accent);
+            }
+            #st-extension-manager-overlay .em-card-choice.is-selected i { color: #fff; opacity: 1; }
             #st-extension-manager-overlay .em-card-icon {
                 width: 40px;
                 height: 40px;
@@ -1372,25 +1497,7 @@
             #st-extension-manager-overlay .em-backend-update-note { margin: 0; font-size: .76em; line-height: 1.45; opacity: .68; }
             #st-extension-manager-overlay .em-update-self[hidden],
             #st-extension-manager-overlay .em-update-backend[hidden] { display: none; }
-            #st-extension-manager-overlay .em-update-choice-list { display: flex; flex-direction: column; gap: 6px; }
-            #st-extension-manager-overlay .em-update-choice {
-                min-width: 0;
-                padding: 8px 9px;
-                border: 1px solid var(--em-line-soft);
-                border-radius: 6px;
-                background: rgba(0, 0, 0, .02);
-                display: flex !important;
-                flex-direction: row !important;
-                align-items: center;
-                gap: 9px;
-                cursor: pointer;
-            }
-            #st-extension-manager-overlay .em-update-choice input { width: 16px; height: 16px; min-height: 16px; padding: 0; flex: 0 0 16px; accent-color: var(--em-accent); }
-            #st-extension-manager-overlay .em-update-choice span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-            #st-extension-manager-overlay .em-update-choice strong { font-size: .82em; }
-            #st-extension-manager-overlay .em-update-choice small { font-size: .7em; opacity: .58; overflow-wrap: anywhere; }
-            #st-extension-manager-overlay .em-update-empty,
-            #st-extension-manager-overlay .em-batch-update-status { padding: 8px 0; font-size: .78em; opacity: .62; }
+            #st-extension-manager-overlay .em-batch-update-status:not(:empty) { padding-top: 8px; font-size: .76em; opacity: .68; }
             #st-extension-manager-overlay .em-empty {
                 min-height: 210px;
                 display: flex;
@@ -1449,12 +1556,13 @@
                 #st-extension-manager-overlay .em-backend-plugin-actions { width: 100%; justify-content: space-between; }
                 #st-extension-manager-overlay .em-group-cards { padding-left: 0; }
                 #st-extension-manager-overlay .em-group-picker { margin-left: 0; }
-                #st-extension-manager-overlay .em-list-head { top: -10px; margin: -1px -1px 9px; padding: 1px 1px 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
+                #st-extension-manager-overlay .em-list-head { top: -10px; margin: -1px -1px 9px; padding: 1px 1px 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }\n                #st-extension-manager-overlay .em-count { display: none; }
                 #st-extension-manager-overlay .em-search-field { grid-column: 1 / -1; min-width: 0; }
                 #st-extension-manager-overlay .em-select,
                 #st-extension-manager-overlay .em-category-filter { width: 100%; min-width: 0; }
                 #st-extension-manager-overlay .em-card { padding: 10px; grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
-                #st-extension-manager-overlay .em-card-icon { width: 34px; height: 34px; }
+                #st-extension-manager-overlay .em-card-icon,
+                #st-extension-manager-overlay .em-card-choice { width: 34px; height: 34px; }
                 #st-extension-manager-overlay .em-card-head { align-items: flex-start; }
                 #st-extension-manager-overlay .em-card-title { font-size: .86em; }
                 #st-extension-manager-overlay .em-status { font-size: .64em; }
@@ -1473,9 +1581,12 @@
                 #st-extension-manager-overlay .em-version { display: none; }
                 #st-extension-manager-overlay .em-tab { font-size: .69em; }
                 #st-extension-manager-overlay .em-count { display: none; }
-                #st-extension-manager-overlay .em-list-head { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+                #st-extension-manager-overlay .em-list-head { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
                 #st-extension-manager-overlay .em-card { grid-template-columns: minmax(0, 1fr); }
                 #st-extension-manager-overlay .em-card-icon { display: none; }
+                #st-extension-manager-overlay .em-card-choice { width: 100%; height: 32px; }
+                #st-extension-manager-overlay .em-batch-summary { align-items: flex-start; flex-direction: column; }
+                #st-extension-manager-overlay .em-batch-summary span { text-align: left; }
                 #st-extension-manager-overlay .em-status { white-space: normal; text-align: center; }
             }
 
@@ -1498,79 +1609,50 @@
             #st-extension-manager-float:not([hidden]) {
                 --em-accent: var(--SmartThemeQuoteColor, #376f91);
                 position: fixed !important;
-                inset: auto max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) auto !important;
+                inset: auto !important;
                 z-index: 2147483646 !important;
-                display: flex !important;
-                visibility: visible !important;
-                align-items: stretch;
-                width: min(168px, calc(100vw - 16px)) !important;
+                width: var(--em-float-size, 34px) !important;
                 height: var(--em-float-size, 34px) !important;
-                min-width: 118px !important;
+                min-width: 25px !important;
                 min-height: 25px !important;
-                max-width: calc(100vw - 16px) !important;
+                max-width: 56px !important;
                 max-height: 56px !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                border: 1px solid rgba(255, 255, 255, .3) !important;
-                border-radius: 5px !important;
+                border: 1px solid rgba(255, 255, 255, .42) !important;
+                border-radius: 50% !important;
                 background: var(--em-accent) !important;
-                box-shadow: 0 4px 14px rgba(8, 14, 22, .24) !important;
+                box-shadow: 0 4px 16px rgba(8, 14, 22, .34) !important;
                 color: #fff !important;
+                display: grid !important;
+                place-items: center;
                 box-sizing: border-box;
                 transform: none !important;
                 opacity: .9 !important;
+                visibility: visible !important;
                 pointer-events: auto !important;
                 cursor: grab;
                 touch-action: none;
                 user-select: none;
                 -webkit-user-select: none;
+                line-height: 1;
+                transition: opacity .14s ease, box-shadow .14s ease;
+            }
+            #st-extension-manager-float .em-float-state {
+                font-size: clamp(11px, calc(var(--em-float-size, 34px) * .38), 19px);
+                pointer-events: none;
+            }
+            #st-extension-manager-float:hover,
+            #st-extension-manager-float:focus-visible {
+                opacity: 1 !important;
+                box-shadow: 0 6px 20px rgba(8, 14, 22, .42) !important;
+                outline: 2px solid rgba(255, 255, 255, .78);
+                outline-offset: -3px;
             }
             #st-extension-manager-float.em-dragging {
                 cursor: grabbing;
                 opacity: 1 !important;
-            }
-            #st-extension-manager-float .em-float-label {
-                min-width: 0;
-                padding: 0 9px;
-                display: flex;
-                align-items: center;
-                gap: 7px;
-                flex: 1 1 auto;
-                overflow: hidden;
-                font-size: 12px;
-                line-height: 1;
-                white-space: nowrap;
-                pointer-events: none;
-            }
-            #st-extension-manager-float .em-float-label span {
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-            #st-extension-manager-float .em-float-restore {
-                width: var(--em-float-size, 34px) !important;
-                height: 100% !important;
-                min-width: 25px !important;
-                min-height: 25px !important;
-                margin: 0 !important;
-                padding: 0 !important;
-                border: 0 !important;
-                border-left: 1px solid rgba(255, 255, 255, .3) !important;
-                border-radius: 0 4px 4px 0 !important;
-                background: rgba(0, 0, 0, .12) !important;
-                color: #fff !important;
-                display: grid !important;
-                place-items: center;
-                flex: 0 0 auto;
-                cursor: pointer;
-                font-size: 12px;
-                line-height: 1;
-                pointer-events: auto !important;
-            }
-            #st-extension-manager-float .em-float-restore:hover,
-            #st-extension-manager-float .em-float-restore:focus-visible {
-                background: rgba(0, 0, 0, .25) !important;
-                outline: 2px solid rgba(255, 255, 255, .72);
-                outline-offset: -3px;
+                transition: none;
             }
 
             @media (prefers-reduced-motion: reduce) {
@@ -1584,38 +1666,48 @@
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = readStoredNightMode();
         $(`#${FLOAT_ID}`).remove();
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展并选择更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><div class="em-update-selection"><div class="em-update-empty">点击“检测更新”开始检查</div></div><label class="em-float-size-control"><span>悬浮条高度</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 已安装后端插件</h3><p class="em-backend-panel-state">正在检测管理后端连接</p><p class="em-backend-update-status">点击按钮检测全部已安装后端插件</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div><div class="em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待检测</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端。请先在 Termux 中安装管理后端：</p><pre>cd ~/SillyTavern/plugins
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展的可用更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 已安装后端插件</h3><p class="em-backend-panel-state">正在检测管理后端连接</p><p class="em-backend-update-status">点击按钮检测全部已安装后端插件</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检测全部</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div><div class="em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待检测</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端。请先在 Termux 中安装管理后端：</p><pre>cd ~/SillyTavern/plugins
 git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">会检测 <code>SillyTavern/plugins</code> 下所有已安装后端插件；更新只执行对应目录的 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></div></section></main></div></div>`);
-        const $float = $(`<div id="${FLOAT_ID}" class="em-float" title="拖动悬浮条调整位置" aria-label="扩展管理器悬浮条" hidden><span class="em-float-label"><i class="em-float-state fa-solid fa-grip-lines"></i><span>扩展管理器</span></span><button type="button" class="em-float-restore" title="展开扩展管理器" aria-label="展开扩展管理器"><i class="fa-solid fa-plus"></i></button></div>`);
+        const $float = $(`<button type="button" id="${FLOAT_ID}" class="em-float" title="点击展开扩展管理器，拖动调整位置" aria-label="点击展开扩展管理器，拖动调整位置" hidden><i class="em-float-state fa-solid fa-wand-magic-sparkles"></i></button>`);
         $('body').append($popup, $float);
         applyFloatingBallSize($popup);
         applyPanelTheme($popup, dark);
         const panelAbortController = new AbortController();
-        const close = () => { panelAbortController.abort(); state.minimized = false; $float.remove(); $popup.fadeOut(180, () => $popup.remove()); };
+        const close = () => { panelAbortController.abort(); state.minimized = false; state.selectionMode = false; state.selectedExtensions.clear(); state.groupPickerSelections.clear(); $float.remove(); $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
         $popup.on('keydown', e => { if (e.key === 'Escape') close(); });
         requestAnimationFrame(() => $popup.trigger('focus'));
         $popup.on('click', '.em-minimize', () => minimizePanel($popup));
-        $float.on('click', '.em-float-restore', () => restorePanel($popup));
         let floatDrag = null;
+        let suppressFloatClick = false;
         $float.on('pointerdown', function (event) {
-            if ($(event.target).closest('.em-float-restore').length) return;
             const pointer = event.originalEvent || event;
             if (pointer.button !== undefined && pointer.button !== 0) return;
             const rect = this.getBoundingClientRect();
-            floatDrag = { pointerId: pointer.pointerId, offsetX: pointer.clientX - rect.left, offsetY: pointer.clientY - rect.top };
+            floatDrag = {
+                pointerId: pointer.pointerId,
+                startX: pointer.clientX,
+                startY: pointer.clientY,
+                originLeft: rect.left,
+                originTop: rect.top,
+                moved: false,
+            };
             this.setPointerCapture?.(pointer.pointerId);
-            $(this).addClass('em-dragging');
             event.preventDefault();
         });
         $float.on('pointermove', function (event) {
             const pointer = event.originalEvent || event;
             if (!floatDrag || pointer.pointerId !== floatDrag.pointerId) return;
+            const dx = pointer.clientX - floatDrag.startX;
+            const dy = pointer.clientY - floatDrag.startY;
+            if (!floatDrag.moved && Math.max(Math.abs(dx), Math.abs(dy)) <= 5) return;
+            floatDrag.moved = true;
+            $(this).addClass('em-dragging');
             const rect = this.getBoundingClientRect();
             const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
             const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-            const left = Math.min(maxLeft, Math.max(8, pointer.clientX - floatDrag.offsetX));
-            const top = Math.min(maxTop, Math.max(8, pointer.clientY - floatDrag.offsetY));
+            const left = Math.min(maxLeft, Math.max(8, floatDrag.originLeft + dx));
+            const top = Math.min(maxTop, Math.max(8, floatDrag.originTop + dy));
             this.style.setProperty('left', `${left}px`, 'important');
             this.style.setProperty('top', `${top}px`, 'important');
             this.style.setProperty('right', 'auto', 'important');
@@ -1625,11 +1717,24 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
         $float.on('pointerup pointercancel', function (event) {
             const pointer = event.originalEvent || event;
             if (!floatDrag || pointer.pointerId !== floatDrag.pointerId) return;
+            const moved = floatDrag.moved;
             if (this.hasPointerCapture?.(pointer.pointerId)) this.releasePointerCapture(pointer.pointerId);
             floatDrag = null;
             $(this).removeClass('em-dragging');
+            if (moved && event.type === 'pointerup') {
+                const rect = this.getBoundingClientRect();
+                storeFloatingPosition(rect.left, rect.top);
+                suppressFloatClick = true;
+            }
         });
-        window.addEventListener('resize', resetFloatingBarPosition, { signal: panelAbortController.signal });
+        $float.on('click', function () {
+            if (suppressFloatClick) {
+                suppressFloatClick = false;
+                return;
+            }
+            restorePanel($popup);
+        });
+        window.addEventListener('resize', positionFloatingButton, { signal: panelAbortController.signal });
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); applyPanelTheme($popup, darkNow); storeNightMode(darkNow); });
         $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void checkBackendUpdate($popup); });
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
@@ -1640,23 +1745,23 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
             try {
                 await saveServerSettings({ floatingBallSize: $(this).val() });
                 applyFloatingBallSize($popup);
-                if (window.toastr) toastr.success('悬浮条高度已保存');
+                if (window.toastr) toastr.success('悬浮球大小已保存');
             } catch (error) {
                 if (window.toastr) toastr.warning(`当前大小仅本次有效：${error.message || error}`);
             }
         });
         $popup.on('click', '.em-group-toggle', function () { const group = $(this).data('group'); if (state.expandedGroups.has(group)) state.expandedGroups.delete(group); else state.expandedGroups.add(group); renderList($popup); });
-        $popup.on('click', '.em-group-add', function () { const group = $(this).data('group'); state.groupPicker = group; state.selectedExtensions.clear(); state.expandedGroups.add(group); renderList($popup); });
-        $popup.on('click', '.em-group-cancel', function () { state.groupPicker = ''; state.selectedExtensions.clear(); renderList($popup); });
-        $popup.on('change', '.em-group-choice input', function () { const folder = $(this).data('folder'); if (this.checked) state.selectedExtensions.add(folder); else state.selectedExtensions.delete(folder); });
+        $popup.on('click', '.em-group-add', function () { const group = $(this).data('group'); state.groupPicker = group; state.groupPickerSelections.clear(); state.expandedGroups.add(group); renderList($popup); });
+        $popup.on('click', '.em-group-cancel', function () { state.groupPicker = ''; state.groupPickerSelections.clear(); renderList($popup); });
+        $popup.on('change', '.em-group-choice input', function () { const folder = $(this).data('folder'); if (this.checked) state.groupPickerSelections.add(folder); else state.groupPickerSelections.delete(folder); });
         $popup.on('click', '.em-group-add-save', async function () {
             const group = String($(this).data('group') || '');
-            if (!state.selectedExtensions.size) { if (window.toastr) toastr.info('请选择要加入分组的扩展'); return; }
-            const assignments = Object.fromEntries(Array.from(state.selectedExtensions, folder => [folder, group]));
+            if (!state.groupPickerSelections.size) { if (window.toastr) toastr.info('请选择要加入分组的扩展'); return; }
+            const assignments = Object.fromEntries(Array.from(state.groupPickerSelections, folder => [folder, group]));
             try {
                 await updateExtensionGroups(assignments);
                 state.groupPicker = '';
-                state.selectedExtensions.clear();
+                state.groupPickerSelections.clear();
                 state.expandedGroups.add(group);
                 renderList($popup);
                 if (window.toastr) toastr.success(`已添加到分组：${group}`);
@@ -1697,10 +1802,52 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
         $popup.on('click', '.em-update-backend', () => updateBackend($popup));
         $popup.on('click', '.em-update-backend-plugin', function () { void updateBackendPlugin(String($(this).attr('data-plugin-id') || ''), $popup); });
         $popup.on('click', '.em-check-all', () => checkAll($popup));
-        $popup.on('change', '.em-update-choice input', function () { const folder = $(this).data('folder'); if (this.checked) state.selectedUpdates.add(folder); else state.selectedUpdates.delete(folder); });
-        $popup.on('click', '.em-select-all', function () { state.selectedUpdates = new Set(quickUpdateExtensions().map(folderOf)); renderUpdateSelection($popup); });
+        $popup.on('click', '.em-multi-toggle', function () {
+            state.selectionMode = !state.selectionMode;
+            if (!state.selectionMode) state.selectedExtensions.clear();
+            renderList($popup);
+        });
+        $popup.on('change', '.em-card-choice input', function () {
+            const folder = String($(this).data('folder') || '');
+            if (this.checked) state.selectedExtensions.add(folder);
+            else state.selectedExtensions.delete(folder);
+            renderList($popup);
+        });
+        $popup.on('click', '.em-select-visible', function () {
+            filteredExtensions().filter(extension => typeOf(extension) !== 'system').forEach(extension => state.selectedExtensions.add(folderOf(extension)));
+            renderList($popup);
+        });
+        $popup.on('click', '.em-clear-selection', function () {
+            state.selectedExtensions.clear();
+            renderList($popup);
+        });
+        $popup.on('click', '.em-batch-group-save', async function () {
+            const selected = state.extensions.filter(extension => state.selectedExtensions.has(folderOf(extension)) && typeOf(extension) !== 'system');
+            if (!selected.length) {
+                if (window.toastr) toastr.info('请先选择要分组的扩展');
+                return;
+            }
+            let group = String($popup.find('.em-batch-group').val() || '');
+            if (group === '__new__') group = String(window.prompt('新分组名称') || '').trim();
+            if (group === '__new__' || group === '内置') {
+                if (window.toastr) toastr.error('该名称为系统保留分组');
+                return;
+            }
+            if ($popup.find('.em-batch-group').val() === '__new__' && !group) return;
+            const assignments = Object.fromEntries(selected.map(extension => [folderOf(extension), group === '未分组' ? '' : group]));
+            const $button = $(this).prop('disabled', true);
+            try {
+                await updateExtensionGroups(assignments);
+                renderList($popup);
+                if (window.toastr) toastr.success(group ? `已将 ${selected.length} 个扩展加入分组：${group}` : `已将 ${selected.length} 个扩展移至未分组`);
+            } catch (error) {
+                if (window.toastr) toastr.error(`批量分组失败：${error.message || error}`);
+                $button.prop('disabled', false);
+            }
+        });
+        $popup.on('click', '.em-check-selected', () => checkSelected($popup));
         $popup.on('click', '.em-update-selected', () => updateSelectedSequentially($popup));
-        $popup.on('click', '.em-check', async function () { const extension = state.extensions.find(item => folderOf(item) === $(this).data('folder')); if (!extension) return; beginDetection($popup); try { await checkOne(extension); renderList($popup); renderUpdateSelection($popup); } finally { finishDetection($popup); } });
+        $popup.on('click', '.em-check', async function () { const extension = state.extensions.find(item => folderOf(item) === $(this).data('folder')); if (!extension) return; beginDetection($popup); try { await checkOne(extension); renderList($popup); renderBatchSelection($popup); } finally { finishDetection($popup); } });
         $popup.on('click', '.em-update', function () { const extension = state.extensions.find(item => folderOf(item) === $(this).data('folder')); if (extension) updateOne(extension, $popup); });
         $popup.on('click', '.em-toggle', async function () { const extension = state.extensions.find(item => folderOf(item) === $(this).data('folder')); if (!extension) return; $(this).prop('disabled', true); try { await setExtensionEnabled(extension, $(this).data('enable') === true || $(this).data('enable') === 'true'); } catch (error) { $(this).prop('disabled', false); if (window.toastr) toastr.error(`切换失败：${error.message || error}`); } });
         $popup.on("click", ".em-edit", function () { const folder = $(this).data("folder"); $popup.find(".em-editor").filter(function () { return $(this).data("editor") === folder; }).prop("hidden", false); });
