@@ -403,8 +403,9 @@ async function init(router) {
         }
         try {
             const data = await readData(req);
-            const ignoredIds = pluginIds.filter(id => data.whitelist.backend.includes(id));
-            const targets = pluginIds.filter(id => !data.whitelist.backend.includes(id));
+            const includeWhitelisted = req.body.includeWhitelisted === true;
+            const ignoredIds = includeWhitelisted ? [] : pluginIds.filter(id => data.whitelist.backend.includes(id));
+            const targets = includeWhitelisted ? pluginIds : pluginIds.filter(id => !data.whitelist.backend.includes(id));
             const plugins = targets.length ? await scanServerPlugins(true, targets) : [];
             res.set('Cache-Control', 'no-store');
             res.json({ ok: true, plugins, pluginCount: plugins.length, ignoredIds });
@@ -419,7 +420,7 @@ async function init(router) {
         const pluginId = String(req.body.pluginId || req.body.id || '').trim();
         try {
             const data = await readData(req);
-            if (data.whitelist.backend.includes(pluginId)) return sendError(res, 409, '该后端插件已加入白名单', 'plugin_whitelisted');
+            if (data.whitelist.backend.includes(pluginId) && req.body.includeWhitelisted !== true) return sendError(res, 409, '该后端插件已加入白名单', 'plugin_whitelisted');
             const result = await enqueueUpdate(() => updateServerPlugin(pluginId));
             const plugin = await readServerPlugin(result.target.id, result.target.directory);
             res.json({
