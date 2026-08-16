@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.14.1';
+    const SCRIPT_VERSION = '1.14.2';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -318,6 +318,15 @@
         return '';
     }
 
+    function githubAuthorFromRepository(value) {
+        const candidate = typeof value === 'string' ? value : (value && typeof value.url === 'string' ? value.url : '');
+        const repository = String(candidate || '').trim().replace(/^git\+/, '');
+        const match = repository.match(/^(?:https?:\/\/(?:[^/@]+@)?|git:\/\/|ssh:\/\/(?:git@)?)github\.com[/:]([A-Za-z0-9-]+)\//i)
+            || repository.match(/^git@github\.com:([A-Za-z0-9-]+)\//i)
+            || repository.match(/^github:([A-Za-z0-9-]+)\//i);
+        return match ? match[1] : '';
+    }
+
     async function checkOne(extension, signal, options = {}) {
         const folder = folderOf(extension);
         if (isFrontendWhitelisted(folder) && !options.allowWhitelisted) return { ignored: true };
@@ -537,11 +546,13 @@
                 nativeName,
                 name: String(meta.name || nativeName),
                 version: String(item?.version || ''),
+                githubAuthor: String(item?.githubAuthor || githubAuthorFromRepository(item?.remoteUrl) || ''),
                 nativeDescription,
                 description: String(meta.note || nativeDescription),
                 note: String(meta.note || ''),
                 category: String(meta.category || ''),
                 currentBranchName: String(item?.currentBranchName || ''),
+                currentCommitHash: String(item?.currentCommitHash || ''),
                 shortCommitHash: String(item?.shortCommitHash || ''),
                 updateSupported: typeof item?.updateSupported === 'boolean' ? item.updateSupported : null,
                 isUpToDate: typeof item?.isUpToDate === 'boolean' ? item.isUpToDate : null,
@@ -575,7 +586,7 @@
         return backendUpdateState.plugins.filter(plugin => {
             const group = backendGroupOf(plugin);
             const matchesCategory = !backendUpdateState.category || group === backendUpdateState.category;
-            const matchesText = !filter || [plugin.name, plugin.nativeName, plugin.id, plugin.description, group].join(' ').toLowerCase().includes(filter);
+            const matchesText = !filter || [plugin.name, plugin.nativeName, plugin.id, plugin.githubAuthor, plugin.description, group].join(' ').toLowerCase().includes(filter);
             return matchesCategory && matchesText;
         }).sort((a, b) => {
             if (backendUpdateState.sort === 'status') {
@@ -635,7 +646,14 @@
                                     ? '不可自动更新'
                                     : '最新';
         const statusClass = available ? 'update' : (ignored ? 'ignored' : '');
-        const details = [plugin.id, plugin.version ? 'v' + plugin.version : '', plugin.currentBranchName, plugin.shortCommitHash].filter(Boolean).join(' · ');
+        const commit = plugin.shortCommitHash || plugin.currentCommitHash.slice(0, 8);
+        const details = [
+            plugin.id,
+            'GitHub作者：' + (plugin.githubAuthor ? '@' + plugin.githubAuthor : '未知'),
+            '版本：' + (plugin.version ? 'v' + plugin.version : '未知'),
+            '提交：' + (commit || '检测后显示'),
+            plugin.currentBranchName ? '分支：' + plugin.currentBranchName : '',
+        ].filter(Boolean).join(' · ');
         const whitelistSelected = whitelistState.selected.has(plugin.id);
         const leading = whitelistView && whitelistState.selectionMode
             ? '<label class="em-card-choice' + (whitelistSelected ? ' is-selected' : '') + '" title="选择 ' + escapeHtml(plugin.name) + '"><input class="em-whitelist-card-choice" type="checkbox" data-whitelist-id="' + escapeHtml(plugin.id) + '"' + (whitelistSelected ? ' checked' : '') + '><i class="fa-solid fa-check"></i></label>'
@@ -1343,6 +1361,7 @@
         const ignored = whitelisted && !whitelistView;
         const available = !ignored && update.isUpToDate === false;
         const repo = repoUrl(extension);
+        const githubAuthor = githubAuthorFromRepository(repo);
         const branch = update.currentBranchName || '未检测';
         const commit = update.shortCommitHash || update.currentCommitHash?.slice(0, 8) || '';
         const typeLabel = { global: '全局', local: '当前用户', system: '内置' }[typeOf(extension)] || typeOf(extension);
@@ -1363,7 +1382,7 @@
             ${leading}
             <div class="em-card-body">
                 <div class="em-card-head"><div class="em-card-title">${escapeHtml(extension.displayName)} <span class="em-type">${escapeHtml(typeLabel)}</span>${group !== '未分组' ? ` <span class="em-category">${escapeHtml(group)}</span>` : ''}</div><span class="em-status ${available ? 'update' : (ignored ? 'ignored' : '')}">${escapeHtml(status)}</span></div>
-                <div class="em-card-sub">${escapeHtml(folder)}${extension.version ? ` · v${escapeHtml(extension.version)}` : ''}${commit ? ` · ${escapeHtml(commit)}` : ''} · ${escapeHtml(branch)}</div>
+                <div class="em-card-sub">${escapeHtml(folder)} · GitHub作者：${escapeHtml(githubAuthor ? `@${githubAuthor}` : '未知')} · 版本：${escapeHtml(extension.version ? `v${extension.version}` : '未知')} · 提交：${escapeHtml(commit || '检测后显示')} · 分支：${escapeHtml(branch)}</div>
                 <div class="em-card-note">${escapeHtml(extension.description)}</div>
                 <div class="em-card-actions">
                     ${repo ? `<a class="em-action" href="${safeRepo}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-code-branch"></i> 仓库</a>` : '<span class="em-action muted"><i class="fa-solid fa-code-branch"></i> 暂无仓库</span>'}

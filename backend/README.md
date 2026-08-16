@@ -46,7 +46,7 @@ http://你的酒馆地址/api/plugins/extension-manager/status
 - `GET /api/plugins/extension-manager/status`：检查后端状态。
 - `GET /api/plugins/extension-manager/version`：检测管理后端自身的 Git 仓库更新。
 - `POST /api/plugins/extension-manager/update`：更新管理后端自身；仅管理员可调用。
-- `GET /api/plugins/extension-manager/plugins?checkUpdates=true`：列出并检测 `SillyTavern/plugins` 下全部后端插件。
+- `GET /api/plugins/extension-manager/plugins?checkUpdates=true`：列出并检测 `SillyTavern/plugins` 下全部后端插件，返回安全解析后的 GitHub 作者、版本和提交信息，不暴露远端仓库凭据。
 - `POST /api/plugins/extension-manager/plugins/check`：按 `pluginIds` 检测指定后端插件；白名单页可显式传入 `includeWhitelisted: true`。
 - `POST /api/plugins/extension-manager/plugins/update`：按 `pluginId` 更新单个后端插件；仅管理员可调用，白名单项仅在白名单页显式传入 `includeWhitelisted: true` 时允许更新。
 - `GET /api/plugins/extension-manager/data`：读取当前酒馆账号的数据。

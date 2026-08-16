@@ -162,6 +162,15 @@ async function runGit(args) {
     return runGitIn(__dirname, args);
 }
 
+function githubAuthorFromRepository(value) {
+    const candidate = typeof value === 'string' ? value : (isObject(value) ? value.url : '');
+    const repository = String(candidate || '').trim().replace(/^git\+/, '');
+    const match = repository.match(/^(?:https?:\/\/(?:[^/@]+@)?|git:\/\/|ssh:\/\/(?:git@)?)github\.com[/:]([A-Za-z0-9-]+)\//i)
+        || repository.match(/^git@github\.com:([A-Za-z0-9-]+)\//i)
+        || repository.match(/^github:([A-Za-z0-9-]+)\//i);
+    return match ? match[1] : '';
+}
+
 async function getGitInfoFor(directory, fetchRemote = true) {
     let inside;
     try {
@@ -235,18 +244,27 @@ async function readServerPlugin(pluginId, directory) {
     if (!packageJson && !manifest && !hasEntry) return null;
     const source = isObject(manifest) ? manifest : {};
     const pkg = isObject(packageJson) ? packageJson : {};
+    const repository = source.homePage || source.homepage || source.repository || pkg.homepage || pkg.repository;
+    let githubAuthor = githubAuthorFromRepository(repository);
+    if (!githubAuthor) {
+        try {
+            githubAuthor = githubAuthorFromRepository((await runGitIn(directory, ['remote', 'get-url', 'origin'])).stdout);
+        } catch (error) {}
+    }
     return {
         id: pluginId,
         name: String(source.display_name || source.displayName || source.name || pkg.displayName || pkg.name || pluginId).trim() || pluginId,
         version: String(source.version || pkg.version || '').trim(),
         description: String(source.description || pkg.description || '').trim(),
+        githubAuthor,
         isManager: path.resolve(directory) === path.resolve(__dirname),
     };
 }
 
 function publicGitInfo(git) {
     const { remoteUrl, ...safe } = git || {};
-    return safe;
+    const githubAuthor = githubAuthorFromRepository(remoteUrl);
+    return githubAuthor ? { ...safe, githubAuthor } : safe;
 }
 
 async function inspectServerPlugin(pluginId, directory, checkUpdates) {
