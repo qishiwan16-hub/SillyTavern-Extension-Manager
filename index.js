@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.5.1';
+    const SCRIPT_VERSION = '1.6.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -306,18 +306,23 @@
     function renderBackendUpdate($popup) {
         const $status = $popup.find('.em-backend-update-status');
         $status.text(backendUpdateState.message).toggleClass('error', backendUpdateState.phase === 'error').toggleClass('update', backendUpdateState.canUpdate).toggleClass('restart', backendUpdateState.restartRequired);
-        $popup.find('.em-check-backend').prop('disabled', ['checking', 'updating'].includes(backendUpdateState.phase) || !state.backend.available);
+        $popup.find('.em-check-backend').prop('disabled', ['checking', 'updating'].includes(backendUpdateState.phase));
         $popup.find('.em-update-backend').prop('hidden', !backendUpdateState.canUpdate).prop('disabled', backendUpdateState.phase === 'updating');
+        renderBackendPanel($popup);
     }
 
     async function checkBackendUpdate($popup) {
         if (backendUpdateState.phase === 'checking' || backendUpdateState.phase === 'updating') return backendUpdateState;
         if (!state.backend.available) {
-            backendUpdateState.phase = 'error';
-            backendUpdateState.message = '后端未连接，无法检测更新';
-            backendUpdateState.canUpdate = false;
-            renderBackendUpdate($popup);
-            return backendUpdateState;
+            await loadServerMeta();
+            renderBackendState($popup);
+            if (!state.backend.available) {
+                backendUpdateState.phase = 'error';
+                backendUpdateState.message = '后端未连接，请先安装服务端插件';
+                backendUpdateState.canUpdate = false;
+                renderBackendUpdate($popup);
+                return backendUpdateState;
+            }
         }
         backendUpdateState.phase = 'checking';
         backendUpdateState.message = '正在检查后端更新';
@@ -514,14 +519,6 @@
         }
     }
 
-    async function install(url, global, branch, $popup) {
-        const clean = String(url || '').trim();
-        if (!/^https?:\/\//i.test(clean)) throw new Error('请输入 HTTP 或 HTTPS 仓库链接');
-        await request('/api/extensions/install', { method: 'POST', body: JSON.stringify({ url: clean, global: !!global, branch: String(branch || '').trim() }) });
-        if (window.toastr) toastr.success('扩展安装完成');
-        await loadExtensions($popup);
-    }
-
     function filteredExtensions() {
         const filter = state.filter.toLowerCase();
         return state.extensions.filter(extension => {
@@ -597,11 +594,22 @@
         </article>`;
     }
 
+    function renderBackendPanel($popup) {
+        const $status = $popup.find('.em-backend-panel-state');
+        if (!$status.length) return;
+        $status.toggleClass('ok', state.backend.available).toggleClass('error', !state.backend.available);
+        $status.text(state.backend.available
+            ? `后端插件已连接${state.backend.version ? ` · v${state.backend.version}` : ''}`
+            : '后端插件未连接');
+        $popup.find('.em-backend-install-help').prop('hidden', state.backend.available);
+    }
+
     function renderBackendState($popup) {
         const $status = $popup.find('.em-backend-state');
         $status.toggleClass('ok', state.backend.available).toggleClass('error', !state.backend.available);
         $status.text(state.backend.available ? `服务端存储已连接${state.backend.version ? ` v${state.backend.version}` : ''}` : '服务端存储未连接');
         if (!state.backend.available && state.backend.error) $status.attr('title', state.backend.error);
+        renderBackendPanel($popup);
     }
 
     async function loadExtensions($popup) {
@@ -1036,6 +1044,15 @@
             #st-extension-manager-overlay .em-self-update-status.error,
             #st-extension-manager-overlay .em-backend-update-status.error,
             #st-extension-manager-overlay .em-error { color: #b94e55; }
+            #st-extension-manager-overlay .em-backend-panel-state { min-height: 22px; margin: 0; font-size: .82em; font-weight: 600; }
+            #st-extension-manager-overlay .em-backend-panel-state.ok { color: #278d50; }
+            #st-extension-manager-overlay .em-backend-panel-state.error { color: #b94e55; }
+            #st-extension-manager-overlay .em-backend-install-help { padding: 10px; border: 1px solid var(--em-line-soft); border-radius: 6px; background: rgba(0, 0, 0, .025); font-size: .78em; line-height: 1.5; }
+            #st-extension-manager-overlay .em-backend-install-help[hidden] { display: none; }
+            #st-extension-manager-overlay .em-backend-install-help p { margin: 0 0 7px; }
+            #st-extension-manager-overlay .em-backend-install-help p:last-child { margin-bottom: 0; }
+            #st-extension-manager-overlay .em-backend-install-help pre { margin: 7px 0; padding: 8px; overflow-x: auto; border-radius: 5px; background: rgba(0, 0, 0, .07); font: .9em/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+            #st-extension-manager-overlay .em-backend-update-note { margin: 0; font-size: .76em; line-height: 1.45; opacity: .68; }
             #st-extension-manager-overlay .em-update-self[hidden],
             #st-extension-manager-overlay .em-update-backend[hidden] { display: none; }
             #st-extension-manager-overlay .em-update-choice-list { display: flex; flex-direction: column; gap: 6px; }
@@ -1180,7 +1197,8 @@
     async function showPopup() {
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = false;
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-link"></i> 添加扩展</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="install"><form class="em-install"><h3><i class="fa-solid fa-link"></i> 从 Git 仓库添加扩展</h3><label>仓库链接<input name="url" type="url" placeholder="https://github.com/作者/仓库" required></label><div class="em-install-row"><label>分支或标签<input name="branch" placeholder="默认分支"></label><label>安装范围<select name="scope"><option value="local">仅当前用户</option><option value="global">全局安装</option></select></label></div><button type="submit" class="em-action primary"><i class="fa-solid fa-download"></i> 安装扩展</button><div class="em-install-status"></div></form></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">点击按钮检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 扩展管理器后端</h3><p class="em-backend-update-status">点击按钮检查后端更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端更新</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">点击“重新检测全部扩展”开始检查</div></div></div></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
+git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">更新只执行后端目录的 <code>git pull --ff-only</code>，不会停止或重启 Termux/SillyTavern；更新完成后请手动重启。</p></div></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">点击按钮检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">点击“重新检测全部扩展”开始检查</div></div></div></div></section></main></div></div>`);
         $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器"><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
         $('body').append($popup);
         const panelAbortController = new AbortController();
@@ -1191,7 +1209,7 @@
         $popup.on('click', '.em-minimize', () => minimizePanel($popup));
         $popup.on('click', '.em-float', () => restorePanel($popup));
         $popup.on('click', '.em-night', function () { const darkNow = !$popup.find('.em-box').hasClass('em-dark'); $popup.find('.em-box').toggleClass('em-dark', darkNow); $(this).find('i').toggleClass('fa-moon', !darkNow).toggleClass('fa-sun', darkNow); });
-        $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); });
+        $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void checkBackendUpdate($popup); });
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
         $popup.on('change', '.em-sort', function () { state.sort = $(this).val(); renderList($popup); });
         $popup.on('change', '.em-category-filter', function () { state.category = $(this).val(); renderList($popup); });
