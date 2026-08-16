@@ -24,6 +24,9 @@ const MAX_EXTENSIONS = 2000;
 const MAX_NAME_LENGTH = 160;
 const MAX_NOTE_LENGTH = 2000;
 const MAX_CATEGORY_LENGTH = 80;
+const FLOATING_BALL_MIN = 25;
+const FLOATING_BALL_MAX = 56;
+const FLOATING_BALL_DEFAULT = 34;
 const GIT_TIMEOUT_MS = 120000;
 let writeQueue = Promise.resolve();
 let updateQueue = Promise.resolve();
@@ -43,12 +46,21 @@ function userFile(req) {
 }
 
 function emptyData() {
-    return { schemaVersion: 1, updatedAt: null, extensions: {} };
+    return { schemaVersion: 2, updatedAt: null, extensions: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
 }
 
 async function readJson(filePath, fallback) {
     try { return JSON.parse(await fsp.readFile(filePath, 'utf8')); }
     catch (error) { if (error && error.code === 'ENOENT') return fallback; throw error; }
+}
+
+function normalizeSettings(value) {
+    const source = isObject(value) ? value : {};
+    const parsed = Number.parseInt(source.floatingBallSize, 10);
+    const floatingBallSize = Number.isFinite(parsed)
+        ? Math.min(FLOATING_BALL_MAX, Math.max(FLOATING_BALL_MIN, parsed))
+        : FLOATING_BALL_DEFAULT;
+    return { floatingBallSize };
 }
 
 function normalizeData(value) {
@@ -64,9 +76,10 @@ function normalizeData(value) {
         if (name || note || category) extensions[safeFolder] = { name, note, category };
     });
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
         extensions,
+        settings: normalizeSettings(source.settings),
     };
 }
 

@@ -1,6 +1,6 @@
 # SillyTavern 扩展管理器后端
 
-为“扩展管理器”保存中文名和备注等资料。数据按酒馆账号写入服务端 JSON 文件，不使用浏览器 localStorage、IndexedDB 或其他浏览器持久化。
+为“扩展管理器”保存中文名、备注、分组和界面设置等资料。数据按酒馆账号写入服务端 JSON 文件，不使用浏览器 localStorage、IndexedDB 或其他浏览器持久化。
 
 ## 安装
 
@@ -58,6 +58,8 @@ SillyTavern/plugins/extension-manager/data/
 ```
 
 账号名称会经过哈希处理后作为文件名。写入过程会先创建临时文件，再原子替换主文件；上一次内容保存在同名 `.bak` 文件中。主文件无法解析时会自动读取 `.bak`。
+
+悬浮球大小等界面设置保存在同一账号文件的 `settings` 字段中，`floatingBallSize` 会限制在 `25-56` 像素。
 
 可以通过环境变量修改数据目录：
 

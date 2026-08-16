@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.6.1';
+    const SCRIPT_VERSION = '1.7.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -12,8 +12,11 @@
     const EXTENSION_DEFAULT_FOLDER = 'SillyTavern-Extension-Manager';
     const EXTENSION_RAW_MANIFEST_URL = 'https://raw.githubusercontent.com/qishiwan16-hub/SillyTavern-Extension-Manager/main/manifest.json';
     const INITIAL_SCRIPT_URL = document.currentScript?.src || '';
+    const FLOATING_BALL_MIN = 25;
+    const FLOATING_BALL_MAX = 56;
+    const FLOATING_BALL_DEFAULT = 34;
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), selectedExtensions: new Set(), expandedGroups: new Set(['未分组']), batchUpdating: false, minimized: false, meta: {}, backend: { available: false, error: '', version: '' } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, updating: new Set(), updates: new Map(), selectedUpdates: new Set(), selectedExtensions: new Set(), expandedGroups: new Set(['内置', '未分组']), groupPicker: '', batchUpdating: false, minimized: false, meta: {}, settings: { floatingBallSize: FLOATING_BALL_DEFAULT }, backend: { available: false, error: '', version: '' } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
     const backendUpdateState = { phase: 'idle', message: '点击按钮检查后端更新', canUpdate: false, updateSupported: false, version: '', restartRequired: false };
     let extensionApiPromise = null;
@@ -44,7 +47,7 @@
         return extensionApiPromise;
     }
 
-    const groupOf = extension => String(extension?.category || '').trim() || (typeOf(extension) === 'system' ? '内置' : '未分组');
+    const groupOf = extension => typeOf(extension) === 'system' ? '内置' : (String(extension?.category || '').trim() || '未分组');
 
     async function setExtensionEnabled(extension, enabled, reload = true) {
         const api = await getExtensionApi();
@@ -60,10 +63,28 @@
             if (!item || typeof item !== 'object') return;
             const name = String(item.name || '').trim();
             const note = String(item.note || '').trim();
-            const category = String(item.category || '').trim();
+            const rawCategory = String(item.category || '').trim();
+            const category = ['内置', '未分组'].includes(rawCategory) ? '' : rawCategory;
             if (name || note || category) result[folder] = { name, note, category };
         });
         return result;
+    }
+
+    function normalizeSettings(value) {
+        const source = value && typeof value === 'object' ? value : {};
+        const parsed = Number.parseInt(source.floatingBallSize, 10);
+        const floatingBallSize = Number.isFinite(parsed)
+            ? Math.min(FLOATING_BALL_MAX, Math.max(FLOATING_BALL_MIN, parsed))
+            : FLOATING_BALL_DEFAULT;
+        return { floatingBallSize };
+    }
+
+    function applyFloatingBallSize($popup) {
+        const size = normalizeSettings(state.settings).floatingBallSize;
+        state.settings.floatingBallSize = size;
+        $popup.css('--em-float-size', `${size}px`);
+        $popup.find('.em-float-size').val(size);
+        $popup.find('.em-float-size-value').text(`${size}px`);
     }
 
     async function loadServerMeta() {
@@ -73,19 +94,29 @@
             const response = await request(`${BACKEND_BASE}/data`, { method: 'GET' });
             const data = response && response.data && typeof response.data === 'object' ? response.data : {};
             state.meta = normalizeMeta(data.extensions);
+            state.settings = normalizeSettings(data.settings);
             state.backend = { available: true, error: '', version: String(status?.version || '') };
         } catch (error) {
             state.meta = {};
+            state.settings = normalizeSettings(state.settings);
             state.backend = { available: false, error: error.message || String(error), version: '' };
         }
     }
 
-    async function saveServerMeta(meta) {
+    async function saveServerMeta(meta, settings = state.settings) {
         if (!state.backend.available) throw new Error('服务端存储未连接，请先安装并启用后端插件');
-        const response = await request(`${BACKEND_BASE}/data`, { method: 'PUT', body: JSON.stringify({ extensions: normalizeMeta(meta) }) });
+        const payload = { extensions: normalizeMeta(meta), settings: normalizeSettings(settings) };
+        const response = await request(`${BACKEND_BASE}/data`, { method: 'PUT', body: JSON.stringify(payload) });
         const data = response && response.data && typeof response.data === 'object' ? response.data : {};
         state.meta = normalizeMeta(data.extensions);
+        state.settings = normalizeSettings(data.settings || payload.settings);
         return state.meta;
+    }
+
+    async function saveServerSettings(settings) {
+        state.settings = normalizeSettings({ ...state.settings, ...(settings || {}) });
+        await saveServerMeta(state.meta, state.settings);
+        return state.settings;
     }
 
     async function fetchManifest(extension) {
@@ -526,31 +557,92 @@
     function filteredExtensions() {
         const filter = state.filter.toLowerCase();
         return state.extensions.filter(extension => {
-            const matchesCategory = !state.category || extension.category === state.category;
-            const matchesText = !filter || [extension.displayName, extension.name, extension.description, extension.category, repoUrl(extension)].join(' ').toLowerCase().includes(filter);
+            const group = groupOf(extension);
+            const matchesCategory = !state.category || group === state.category;
+            const matchesText = !filter || [extension.displayName, extension.name, extension.description, group, repoUrl(extension)].join(' ').toLowerCase().includes(filter);
             return matchesCategory && matchesText;
         }).sort((a, b) => {
-            if (state.sort === 'type') return typeOf(a).localeCompare(typeOf(b)) || a.displayName.localeCompare(b.displayName);
-            if (state.sort === 'category') return String(a.category || '未分类').localeCompare(String(b.category || '未分类'), 'zh-Hans') || a.displayName.localeCompare(b.displayName, 'zh-Hans');
+            if (state.sort === 'type') return typeOf(a).localeCompare(typeOf(b)) || a.displayName.localeCompare(b.displayName, 'zh-Hans');
             return a.displayName.localeCompare(b.displayName, 'zh-Hans');
         });
     }
 
     function renderCategoryOptions($popup) {
-        const categories = Array.from(new Set(state.extensions.map(extension => extension.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-Hans'));
+        const categories = Array.from(new Set(state.extensions.map(groupOf))).sort((a, b) => {
+            if (a === '内置') return -1;
+            if (b === '内置') return 1;
+            if (a === '未分组') return 1;
+            if (b === '未分组') return -1;
+            return a.localeCompare(b, 'zh-Hans');
+        });
         if (state.category && !categories.includes(state.category)) state.category = '';
-        const options = ['<option value="">全部分类</option>', ...categories.map(category => `<option value="${escapeHtml(category)}" ${state.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`)].join('');
+        const options = ['<option value="">全部分组</option>', ...categories.map(category => `<option value="${escapeHtml(category)}" ${state.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`)].join('');
         $popup.find('.em-category-filter').html(options);
     }
 
+    function renderGroupPicker(group) {
+        const candidates = state.extensions
+            .filter(extension => typeOf(extension) !== 'system' && groupOf(extension) !== group)
+            .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-Hans'));
+        const choices = candidates.length
+            ? candidates.map(extension => {
+                const folder = folderOf(extension);
+                return `<label class="em-group-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.selectedExtensions.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(groupOf(extension))}</small></span></label>`;
+            }).join('')
+            : '<div class="em-group-picker-empty">没有可添加的扩展</div>';
+        return `<div class="em-group-picker" data-group-picker="${escapeHtml(group)}"><div class="em-group-picker-list">${choices}</div><div class="em-group-picker-actions"><button type="button" class="em-action em-group-cancel"><i class="fa-solid fa-xmark"></i> 取消</button><button type="button" class="em-action primary em-group-add-save" data-group="${escapeHtml(group)}" ${candidates.length ? '' : 'disabled'}><i class="fa-solid fa-folder-plus"></i> 添加选中</button></div></div>`;
+    }
+
+    function renderGroup(group, extensions) {
+        const expanded = state.expandedGroups.has(group) || state.groupPicker === group;
+        const custom = group !== '内置' && group !== '未分组';
+        const actions = custom
+            ? `<div class="em-group-actions"><button type="button" class="em-icon em-group-add" data-group="${escapeHtml(group)}" title="添加扩展" aria-label="向 ${escapeHtml(group)} 添加扩展"><i class="fa-solid fa-folder-plus"></i></button><button type="button" class="em-icon em-group-rename" data-group="${escapeHtml(group)}" title="重命名分组" aria-label="重命名 ${escapeHtml(group)}"><i class="fa-solid fa-pen"></i></button><button type="button" class="em-icon em-group-dissolve" data-group="${escapeHtml(group)}" title="解散分组" aria-label="解散 ${escapeHtml(group)}"><i class="fa-solid fa-folder-minus"></i></button></div>`
+            : '';
+        const picker = state.groupPicker === group ? renderGroupPicker(group) : '';
+        const icon = group === '内置' ? 'fa-box-archive' : (expanded ? 'fa-folder-open' : 'fa-folder');
+        return `<section class="em-group" data-group="${escapeHtml(group)}"><header class="em-group-head"><button type="button" class="em-icon em-group-toggle" data-group="${escapeHtml(group)}" title="${expanded ? '收起' : '展开'}分组" aria-label="${expanded ? '收起' : '展开'} ${escapeHtml(group)}" aria-expanded="${expanded}"><i class="fa-solid fa-chevron-${expanded ? 'down' : 'right'}"></i></button><i class="fa-solid ${icon} em-group-folder"></i><strong>${escapeHtml(group)}</strong><span class="em-group-count">${extensions.length}</span>${actions}</header><div class="em-group-content" ${expanded ? '' : 'hidden'}><div class="em-group-cards">${extensions.map(renderCard).join('')}</div>${picker}</div></section>`;
+    }
+
     function renderList($popup) {
+        renderCategoryOptions($popup);
         const list = filteredExtensions();
+        const groups = new Map();
+        list.forEach(extension => {
+            const group = groupOf(extension);
+            if (!groups.has(group)) groups.set(group, []);
+            groups.get(group).push(extension);
+        });
+        const names = Array.from(groups.keys()).sort((a, b) => {
+            if (a === '内置') return -1;
+            if (b === '内置') return 1;
+            if (a === '未分组') return 1;
+            if (b === '未分组') return -1;
+            return a.localeCompare(b, 'zh-Hans');
+        });
         const html = state.checking && !state.extensions.some(item => state.updates.has(folderOf(item)))
             ? '<div class="em-empty"><i class="fa-solid fa-spinner fa-spin"></i><span>正在读取扩展信息</span></div>'
-            : list.length ? list.map(renderCard).join('') : '<div class="em-empty"><i class="fa-solid fa-puzzle-piece"></i><span>没有匹配的扩展</span></div>';
+            : list.length ? names.map(name => renderGroup(name, groups.get(name))).join('') : '<div class="em-empty"><i class="fa-solid fa-puzzle-piece"></i><span>没有匹配的扩展</span></div>';
         $popup.find('#em-list').html(html);
         $popup.find('#em-count').text(`${list.length} / ${state.extensions.length}`);
-        renderCategoryOptions($popup);
+    }
+
+    async function updateExtensionGroups(assignments) {
+        if (!state.backend.available) throw new Error('服务端存储未连接，无法保存分组');
+        const nextMeta = { ...state.meta };
+        Object.entries(assignments || {}).forEach(([folder, group]) => {
+            const current = nextMeta[folder] && typeof nextMeta[folder] === 'object' ? nextMeta[folder] : {};
+            const item = { name: String(current.name || ''), note: String(current.note || ''), category: String(group || '').trim() };
+            if (item.name || item.note || item.category) nextMeta[folder] = item;
+            else delete nextMeta[folder];
+        });
+        await saveServerMeta(nextMeta);
+        state.extensions.forEach(extension => {
+            const folder = folderOf(extension);
+            if (Object.prototype.hasOwnProperty.call(assignments, folder) && typeOf(extension) !== 'system') {
+                extension.category = state.meta[folder]?.category || '';
+            }
+        });
     }
 
     function quickUpdateExtensions() {
@@ -567,7 +659,7 @@
         }
         const rows = available.map(extension => {
             const folder = folderOf(extension);
-            return `<label class="em-update-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.selectedUpdates.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(folder)}${extension.category ? ` · ${escapeHtml(extension.category)}` : ''}</small></span></label>`;
+            return `<label class="em-update-choice"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${state.selectedUpdates.has(folder) ? 'checked' : ''}><span><strong>${escapeHtml(extension.displayName)}</strong><small>${escapeHtml(folder)} · ${escapeHtml(groupOf(extension))}</small></span></label>`;
         }).join('');
         $container.html(`<div class="em-update-choice-list">${rows}</div><div class="em-update-actions"><button type="button" class="em-action em-select-all"><i class="fa-solid fa-list-check"></i> 全选</button><button type="button" class="em-action primary em-update-selected"><i class="fa-solid fa-bolt"></i> 快速更新选中</button></div><div class="em-batch-update-status"></div>`);
     }
@@ -582,18 +674,22 @@
         const typeLabel = { global: '全局', local: '当前用户', system: '内置' }[typeOf(extension)] || typeOf(extension);
         const status = state.updating.has(folder) ? '更新中' : !extension.enabled ? '已禁用' : update.error ? '检测失败' : available ? '有更新' : update.isUpToDate === true ? '已是最新' : '未检测';
         const safeRepo = escapeHtml(repo);
+        const group = groupOf(extension);
+        const groupInput = typeOf(extension) === 'system'
+            ? '<input class="em-category-input" value="内置" disabled>'
+            : `<input class="em-category-input" value="${escapeHtml(extension.category || '')}" maxlength="80" placeholder="输入名称即可形成分组文件夹">`;
         return `<article class="em-card ${available ? 'is-update' : ''} ${extension.enabled ? '' : 'is-disabled'}">
             <div class="em-card-icon"><i class="fa-solid fa-puzzle-piece"></i></div>
             <div class="em-card-body">
-                <div class="em-card-head"><div class="em-card-title">${escapeHtml(extension.displayName)} <span class="em-type">${escapeHtml(typeLabel)}</span>${extension.category ? ` <span class="em-category">${escapeHtml(extension.category)}</span>` : ''}</div><span class="em-status ${available ? 'update' : ''}">${escapeHtml(status)}</span></div>
+                <div class="em-card-head"><div class="em-card-title">${escapeHtml(extension.displayName)} <span class="em-type">${escapeHtml(typeLabel)}</span>${group !== '未分组' ? ` <span class="em-category">${escapeHtml(group)}</span>` : ''}</div><span class="em-status ${available ? 'update' : ''}">${escapeHtml(status)}</span></div>
                 <div class="em-card-sub">${escapeHtml(folder)}${extension.version ? ` · v${escapeHtml(extension.version)}` : ''}${commit ? ` · ${escapeHtml(commit)}` : ''} · ${escapeHtml(branch)}</div>
                 <div class="em-card-note">${escapeHtml(extension.description)}</div>
                 <div class="em-card-actions">
                     ${repo ? `<a class="em-action" href="${safeRepo}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-code-branch"></i> 仓库</a>` : '<span class="em-action muted"><i class="fa-solid fa-code-branch"></i> 暂无仓库</span>'}
-                    <button type="button" class="em-action em-edit" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-tags"></i> 中文资料与分类</button>
+                    <button type="button" class="em-action em-edit" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>
                     ${isExternal(extension) ? `<button type="button" class="em-action em-toggle" data-folder="${escapeHtml(folder)}" data-enable="${extension.enabled ? 'false' : 'true'}"><i class="fa-solid fa-power-off"></i> ${extension.enabled ? '禁用' : '启用'}</button><button type="button" class="em-action em-check" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-arrows-rotate"></i> 检查</button>${available ? `<button type="button" class="em-action primary em-update" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button>` : ''}` : ''}
                 </div>
-                <div class="em-editor" data-editor="${escapeHtml(folder)}" hidden><label>中文名<input class="em-name-input" value="${escapeHtml(extension.zhName || '')}" maxlength="80"></label><label>分类<input class="em-category-input" value="${escapeHtml(extension.category || '')}" maxlength="80" placeholder="例如：界面、角色卡、工具"></label><label>备注<textarea class="em-note-input" maxlength="500">${escapeHtml(extension.note || '')}</textarea></label><button type="button" class="em-save-meta primary" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-floppy-disk"></i> 保存</button></div>
+                <div class="em-editor" data-editor="${escapeHtml(folder)}" hidden><label>中文名<input class="em-name-input" value="${escapeHtml(extension.zhName || '')}" maxlength="80"></label><label>分组${groupInput}</label><label>备注<textarea class="em-note-input" maxlength="500">${escapeHtml(extension.note || '')}</textarea></label><button type="button" class="em-save-meta primary" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-floppy-disk"></i> 保存</button></div>
             </div>
         </article>`;
     }
@@ -621,6 +717,7 @@
         try {
             await loadServerMeta();
             renderBackendState($popup);
+            applyFloatingBallSize($popup);
             await discover();
             renderList($popup);
         } catch (error) {
@@ -833,6 +930,34 @@
             }
             #st-extension-manager-overlay .em-panel { display: none; min-width: 0; }
             #st-extension-manager-overlay .em-panel.active { display: block; animation: em-content-in .14s ease-out; }
+            #st-extension-manager-overlay .em-frontend-tools {
+                margin: -2px -2px 12px;
+                padding: 2px 2px 12px;
+                border-bottom: 1px solid var(--em-line);
+                display: flex;
+                flex-direction: column;
+                gap: 9px;
+            }
+            #st-extension-manager-overlay .em-tool-row {
+                min-width: 0;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            #st-extension-manager-overlay .em-tool-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; }
+            #st-extension-manager-overlay .em-tool-copy strong { font-size: .82em; }
+            #st-extension-manager-overlay .em-tool-copy span { min-height: 0; font-size: .72em; line-height: 1.4; opacity: .62; }
+            #st-extension-manager-overlay .em-tool-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+            #st-extension-manager-overlay .em-float-size-control {
+                min-width: 0;
+                display: grid;
+                grid-template-columns: auto minmax(90px, 1fr) 42px;
+                align-items: center;
+                gap: 9px;
+                font-size: .74em;
+            }
+            #st-extension-manager-overlay .em-float-size { width: 100%; min-height: 20px; padding: 0; accent-color: var(--em-accent); }
+            #st-extension-manager-overlay .em-float-size-value { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; opacity: .68; }
             @keyframes em-content-in {
                 from { opacity: 0; transform: translateY(3px); }
                 to { opacity: 1; transform: translateY(0); }
@@ -886,6 +1011,31 @@
             #st-extension-manager-overlay .em-count { font-size: .76em; opacity: .62; white-space: nowrap; }
 
             #st-extension-manager-overlay .em-list { display: flex; flex-direction: column; gap: 8px; }
+            #st-extension-manager-overlay .em-group { min-width: 0; border-top: 1px solid var(--em-line); }
+            #st-extension-manager-overlay .em-group:first-child { border-top: 0; }
+            #st-extension-manager-overlay .em-group-head {
+                min-height: 42px;
+                display: flex;
+                align-items: center;
+                gap: 7px;
+            }
+            #st-extension-manager-overlay .em-group-head > strong { min-width: 0; overflow-wrap: anywhere; font-size: .84em; }
+            #st-extension-manager-overlay .em-group-toggle { width: 28px; height: 28px; flex: 0 0 28px; font-size: .72em; }
+            #st-extension-manager-overlay .em-group-folder { color: var(--em-accent); opacity: .78; }
+            #st-extension-manager-overlay .em-group-count { min-width: 22px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .055); font-size: .68em; text-align: center; opacity: .68; }
+            #st-extension-manager-overlay .em-group-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+            #st-extension-manager-overlay .em-group-actions .em-icon { width: 28px; height: 28px; font-size: .78em; }
+            #st-extension-manager-overlay .em-group-content[hidden] { display: none; }
+            #st-extension-manager-overlay .em-group-cards { display: flex; flex-direction: column; gap: 8px; padding: 0 0 8px 35px; }
+            #st-extension-manager-overlay .em-group-picker { margin: 0 0 10px 35px; padding: 10px; border: 1px solid var(--em-line); border-radius: 6px; background: var(--em-surface); }
+            #st-extension-manager-overlay .em-group-picker-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+            #st-extension-manager-overlay .em-group-choice { min-width: 0; padding: 6px 7px; display: flex !important; flex-direction: row !important; align-items: center; gap: 8px; cursor: pointer; }
+            #st-extension-manager-overlay .em-group-choice input { width: 16px; height: 16px; min-height: 16px; padding: 0; flex: 0 0 16px; accent-color: var(--em-accent); }
+            #st-extension-manager-overlay .em-group-choice span { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+            #st-extension-manager-overlay .em-group-choice strong { font-size: .78em; overflow-wrap: anywhere; }
+            #st-extension-manager-overlay .em-group-choice small { font-size: .68em; opacity: .58; }
+            #st-extension-manager-overlay .em-group-picker-actions { margin-top: 9px; display: flex; justify-content: flex-end; gap: 7px; }
+            #st-extension-manager-overlay .em-group-picker-empty { padding: 10px; text-align: center; font-size: .76em; opacity: .6; }
             #st-extension-manager-overlay .em-card {
                 min-width: 0;
                 padding: 12px;
@@ -1129,6 +1279,11 @@
                 #st-extension-manager-overlay .em-toolbar { min-height: 46px; padding: 6px 8px; gap: 3px; }
                 #st-extension-manager-overlay .em-tab { min-height: 34px; padding: 6px 4px; font-size: .74em; gap: 5px; }
                 #st-extension-manager-overlay .em-content { padding: 10px; scrollbar-gutter: auto; }
+                #st-extension-manager-overlay .em-tool-row { align-items: flex-start; flex-wrap: wrap; }
+                #st-extension-manager-overlay .em-tool-actions { width: 100%; }
+                #st-extension-manager-overlay .em-tool-actions > * { flex: 1 1 0; }
+                #st-extension-manager-overlay .em-group-cards { padding-left: 0; }
+                #st-extension-manager-overlay .em-group-picker { margin-left: 0; }
                 #st-extension-manager-overlay .em-list-head { top: -10px; margin: -1px -1px 9px; padding: 1px 1px 9px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; }
                 #st-extension-manager-overlay .em-search-field { grid-column: 1 / -1; min-width: 0; }
                 #st-extension-manager-overlay .em-select,
@@ -1177,10 +1332,10 @@
                 position: fixed;
                 right: max(8px, env(safe-area-inset-right));
                 bottom: max(8px, env(safe-area-inset-bottom));
-                width: 34px;
-                height: 34px;
-                min-width: 34px;
-                min-height: 34px;
+                width: var(--em-float-size, 34px);
+                height: var(--em-float-size, 34px);
+                min-width: var(--em-float-size, 34px);
+                min-height: var(--em-float-size, 34px);
                 padding: 0;
                 border: 1px solid rgba(255, 255, 255, .26);
                 border-radius: 50%;
@@ -1211,10 +1366,11 @@
     async function showPopup() {
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = false;
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 已安装</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="updates"><i class="fa-solid fa-cloud-arrow-down"></i> 更新检查</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分类或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option><option value="category">按分类</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
-git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">更新只执行后端目录的 <code>git pull --ff-only</code>，不会停止或重启 Termux/SillyTavern；更新完成后请手动重启。</p></div></section><section class="em-panel" data-panel="updates"><div class="em-update-layout"><div class="em-install"><h3><i class="fa-solid fa-wand-magic-sparkles"></i> 扩展管理器本体</h3><p class="em-self-update-status">点击按钮检查本体更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检查本体更新</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 立即更新</button></div></div><div class="em-install"><h3><i class="fa-solid fa-bolt"></i> 扩展快速更新</h3><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 重新检测全部扩展</button><div class="em-update-selection"><div class="em-update-empty">点击“重新检测全部扩展”开始检查</div></div></div></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span>检测全部前端扩展并选择更新</span></div><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button></div><div class="em-update-selection"><div class="em-update-empty">点击“检测更新”开始检查</div></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-install em-backend-panel"><h3><i class="fa-solid fa-server"></i> 酒馆后端插件</h3><p class="em-backend-panel-state">正在检测后端连接</p><p class="em-backend-update-status">点击“检查后端”检测版本与更新</p><div class="em-update-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-arrows-rotate"></i> 检查后端</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新后端</button></div><div class="em-backend-install-help" hidden><p>未检测到后端插件。请先在 Termux 中安装：</p><pre>cd ~/SillyTavern/plugins
+git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backend.git extension-manager</pre><p>并在 <code>config.yaml</code> 中启用 <code>enableServerPlugins: true</code>，然后重启 SillyTavern。</p></div><p class="em-backend-update-note">更新只执行后端目录的 <code>git pull --ff-only</code>，不会停止或重启 Termux/SillyTavern；更新完成后请手动重启。</p></div></section></main></div></div>`);
         $popup.append('<button type="button" class="em-float" title="展开扩展管理器" aria-label="展开扩展管理器" aria-expanded="false"><i class="fa-solid fa-wand-magic-sparkles"></i></button>');
         $('body').append($popup);
+        applyFloatingBallSize($popup);
         const panelAbortController = new AbortController();
         const close = () => { panelAbortController.abort(); state.minimized = false; $popup.fadeOut(180, () => $popup.remove()); };
         $popup.on('click', '.em-close', close).on('click', e => { if (e.target === $popup[0]) close(); });
@@ -1227,6 +1383,61 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
         $popup.on('input', '.em-search', function () { state.filter = $(this).val(); renderList($popup); });
         $popup.on('change', '.em-sort', function () { state.sort = $(this).val(); renderList($popup); });
         $popup.on('change', '.em-category-filter', function () { state.category = $(this).val(); renderList($popup); });
+        $popup.on('input', '.em-float-size', function () { state.settings = normalizeSettings({ ...state.settings, floatingBallSize: $(this).val() }); applyFloatingBallSize($popup); });
+        $popup.on('change', '.em-float-size', async function () {
+            try {
+                await saveServerSettings({ floatingBallSize: $(this).val() });
+                applyFloatingBallSize($popup);
+                if (window.toastr) toastr.success('悬浮球大小已保存');
+            } catch (error) {
+                if (window.toastr) toastr.warning(`当前大小仅本次有效：${error.message || error}`);
+            }
+        });
+        $popup.on('click', '.em-group-toggle', function () { const group = $(this).data('group'); if (state.expandedGroups.has(group)) state.expandedGroups.delete(group); else state.expandedGroups.add(group); renderList($popup); });
+        $popup.on('click', '.em-group-add', function () { const group = $(this).data('group'); state.groupPicker = group; state.selectedExtensions.clear(); state.expandedGroups.add(group); renderList($popup); });
+        $popup.on('click', '.em-group-cancel', function () { state.groupPicker = ''; state.selectedExtensions.clear(); renderList($popup); });
+        $popup.on('change', '.em-group-choice input', function () { const folder = $(this).data('folder'); if (this.checked) state.selectedExtensions.add(folder); else state.selectedExtensions.delete(folder); });
+        $popup.on('click', '.em-group-add-save', async function () {
+            const group = String($(this).data('group') || '');
+            if (!state.selectedExtensions.size) { if (window.toastr) toastr.info('请选择要加入分组的扩展'); return; }
+            const assignments = Object.fromEntries(Array.from(state.selectedExtensions, folder => [folder, group]));
+            try {
+                await updateExtensionGroups(assignments);
+                state.groupPicker = '';
+                state.selectedExtensions.clear();
+                state.expandedGroups.add(group);
+                renderList($popup);
+                if (window.toastr) toastr.success(`已添加到分组：${group}`);
+            } catch (error) { if (window.toastr) toastr.error(`添加失败：${error.message || error}`); }
+        });
+        $popup.on('click', '.em-group-rename', async function () {
+            const group = String($(this).data('group') || '');
+            const nextGroup = String(window.prompt('新的分组名称', group) || '').trim();
+            if (!nextGroup || nextGroup === group) return;
+            if (['内置', '未分组'].includes(nextGroup)) { if (window.toastr) toastr.error('该名称为系统保留分组'); return; }
+            const assignments = Object.fromEntries(state.extensions.filter(extension => typeOf(extension) !== 'system' && groupOf(extension) === group).map(extension => [folderOf(extension), nextGroup]));
+            try {
+                await updateExtensionGroups(assignments);
+                state.expandedGroups.delete(group);
+                state.expandedGroups.add(nextGroup);
+                if (state.category === group) state.category = nextGroup;
+                renderList($popup);
+                if (window.toastr) toastr.success(`分组已重命名为：${nextGroup}`);
+            } catch (error) { if (window.toastr) toastr.error(`重命名失败：${error.message || error}`); }
+        });
+        $popup.on('click', '.em-group-dissolve', async function () {
+            const group = String($(this).data('group') || '');
+            if (!window.confirm(`解散分组“${group}”？扩展本身不会被修改。`)) return;
+            const assignments = Object.fromEntries(state.extensions.filter(extension => typeOf(extension) !== 'system' && groupOf(extension) === group).map(extension => [folderOf(extension), '']));
+            try {
+                await updateExtensionGroups(assignments);
+                state.expandedGroups.delete(group);
+                state.expandedGroups.add('未分组');
+                if (state.category === group) state.category = '';
+                renderList($popup);
+                if (window.toastr) toastr.success(`分组已解散：${group}`);
+            } catch (error) { if (window.toastr) toastr.error(`解散失败：${error.message || error}`); }
+        });
         $popup.on('click', '.em-refresh', () => loadExtensions($popup));
         $popup.on('click', '.em-check-self', () => checkSelfUpdate($popup, panelAbortController.signal));
         $popup.on('click', '.em-update-self', () => updateSelf($popup));
@@ -1246,14 +1457,18 @@ git clone https://github.com/qishiwan16-hub/SillyTavern-Extension-Manager-Backen
             if (!extension) return;
             const $button = $(this);
             const editor = $popup.find('.em-editor').filter(function () { return $(this).data('editor') === folder; });
-            const nextMeta = { ...state.meta, [folder]: { name: String(editor.find('.em-name-input').val() || '').trim(), note: String(editor.find('.em-note-input').val() || '').trim(), category: String(editor.find('.em-category-input').val() || '').trim() } };
+            const category = typeOf(extension) === 'system' ? '' : String(editor.find('.em-category-input').val() || '').trim();
+            if (category === '内置') { if (window.toastr) toastr.error('“内置”是系统保留分组'); return; }
+            const normalizedCategory = category === '未分组' ? '' : category;
+            const nextMeta = { ...state.meta, [folder]: { name: String(editor.find('.em-name-input').val() || '').trim(), note: String(editor.find('.em-note-input').val() || '').trim(), category: normalizedCategory } };
             $button.prop('disabled', true);
             try {
                 await saveServerMeta(nextMeta);
                 const saved = state.meta[folder] || {};
                 extension.zhName = saved.name || chineseValue(extension.manifest, ['display_name_zh', 'displayNameZh', 'zh_name', 'name_zh']);
                 extension.note = saved.note || chineseValue(extension.manifest, ['description_zh', 'descriptionZh', 'zh_description', 'note_zh', 'remarks_zh']);
-                extension.category = saved.category || '';
+                extension.category = typeOf(extension) === 'system' ? '' : (saved.category || '');
+                state.expandedGroups.add(groupOf(extension));
                 extension.displayName = extension.zhName || extension.manifest.display_name || folder;
                 extension.description = extension.note || extension.manifest.description || '暂无备注';
                 renderList($popup);
