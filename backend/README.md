@@ -62,7 +62,7 @@ SillyTavern/plugins/extension-manager/data/
 
 账号名称会经过哈希处理后作为文件名。写入过程会先创建临时文件，再原子替换主文件；上一次内容保存在同名 `.bak` 文件中。主文件无法解析时会自动读取 `.bak`。
 
-前端扩展资料保存在 `extensions`，后端插件的中文名、备注和分组保存在 `backendPlugins`。不参与检测和更新的前后端插件保存在 `whitelist.frontend` 与 `whitelist.backend`。悬浮球大小保存在同一账号文件的 `settings` 字段中，并限制在 `25-56` 像素。
+前端扩展资料保存在 `extensions`，后端插件的中文名、备注和分组保存在 `backendPlugins`。不参与检测和更新的前后端插件保存在 `whitelist.frontend` 与 `whitelist.backend`。悬浮球大小、弱网检测优化开关和可选 Git 代理保存在同一账号文件的 `settings` 字段中。悬浮球限制在 `25-56` 像素。代理仅接受不含用户名和密码的 `http://`、`https://`、`socks5://` 或 `socks5h://` 地址。
 
 可以通过环境变量修改数据目录：
 
@@ -73,6 +73,8 @@ export EXTENSION_MANAGER_DATA_DIR=/你的数据目录
 ## 更新
 
 前端面板可以调用本后端的更新接口，检测 `SillyTavern/plugins` 下包含 `index.js`、`package.json` 或 `manifest.json` 的直接子目录。只有目录自身是独立 Git 仓库并配置了上游分支时才支持自动更新。
+
+弱网检测优化默认开启：远端检测最多同时执行 2 个，并只对超时、连接中断、限流和临时服务端错误进行退避重试。Git 代理通过单次命令的 `http.proxy` 参数传入，不修改全局 Git 配置或插件仓库的 `origin`。
 
 更新单个插件等价于：
 

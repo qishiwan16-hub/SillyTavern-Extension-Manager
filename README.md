@@ -8,6 +8,7 @@
 - 显示清单名称、中文名、备注、GitHub 作者、版本、分支、提交号和 Git 仓库，方便核对实际安装来源与代码版本。
 - 后端管理页与前端管理保持一致，支持搜索、文件夹分组、默认折叠、多选、逐项检测和顺序更新。
 - 前端扩展列表上方集中提供本体检测、扩展检测和更新操作，检测失败项可以一键重试。
+- 弱网检测优化默认开启：前端检测限制为 2 个并发并对临时网络错误退避重试；可选 Git 代理临时用于后端插件检测与更新，不修改全局 Git 配置或仓库地址。
 - 使用酒馆原生版本与更新接口检查更新。
 - 扩展管理器本体支持自动检测、手动检查和更新后热加载。
 - 后端只对检测到更新的独立 Git 仓库执行安全的 `git pull --ff-only`，完成后只提示手动重启 SillyTavern。
@@ -91,7 +92,7 @@ http://你的酒馆地址/api/plugins/extension-manager/status
 SillyTavern/plugins/extension-manager/data/
 ```
 
-每次保存会先写临时文件再替换主文件，并把上一次数据保留为 `.bak`。前端扩展资料保存在 `extensions`，后端插件资料保存在 `backendPlugins`，前后端白名单保存在 `whitelist`，悬浮球大小保存在 `settings.floatingBallSize`。后端不可用时，前端标注保存在浏览器本地键 `st-extension-manager-frontend-meta-v1`；日间/夜间偏好也保存在浏览器本地。也可以通过 `EXTENSION_MANAGER_DATA_DIR` 环境变量指定其他数据目录。
+每次保存会先写临时文件再替换主文件，并把上一次数据保留为 `.bak`。前端扩展资料保存在 `extensions`，后端插件资料保存在 `backendPlugins`，前后端白名单保存在 `whitelist`，悬浮球大小、弱网开关和可选 Git 代理保存在 `settings`。后端不可用时，前端标注保存在浏览器本地键 `st-extension-manager-frontend-meta-v1`；日间/夜间偏好也保存在浏览器本地。也可以通过 `EXTENSION_MANAGER_DATA_DIR` 环境变量指定其他数据目录。
 
 ## 更新
 

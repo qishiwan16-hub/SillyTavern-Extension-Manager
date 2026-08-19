@@ -28,6 +28,9 @@ const FLOATING_BALL_MIN = 25;
 const FLOATING_BALL_MAX = 56;
 const FLOATING_BALL_DEFAULT = 34;
 const GIT_TIMEOUT_MS = 120000;
+const OPTIMIZED_GIT_TIMEOUT_MS = 240000;
+const NETWORK_DETECTION_CONCURRENCY = 2;
+const NETWORK_RETRY_DELAYS = [1200, 3200];
 const PLUGINS_DIR = path.dirname(__dirname);
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 let writeQueue = Promise.resolve();
@@ -48,12 +51,28 @@ function userFile(req) {
 }
 
 function emptyData() {
-    return { schemaVersion: 4, updatedAt: null, extensions: {}, backendPlugins: {}, whitelist: { frontend: [], backend: [] }, settings: { floatingBallSize: FLOATING_BALL_DEFAULT } };
+    return { schemaVersion: 5, updatedAt: null, extensions: {}, backendPlugins: {}, whitelist: { frontend: [], backend: [] }, settings: { floatingBallSize: FLOATING_BALL_DEFAULT, networkOptimization: true, gitProxy: '' } };
 }
 
 async function readJson(filePath, fallback) {
     try { return JSON.parse(await fsp.readFile(filePath, 'utf8')); }
     catch (error) { if (error && error.code === 'ENOENT') return fallback; throw error; }
+}
+
+function normalizeGitProxy(value, strict = false) {
+    const candidate = String(value || "").trim();
+    if (!candidate) return "";
+    try {
+        const parsed = new URL(candidate);
+        if (!["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol)) throw new Error("仅支持 HTTP、HTTPS、SOCKS5 代理");
+        if (!parsed.hostname) throw new Error("代理地址缺少主机名");
+        if (parsed.username || parsed.password) throw new Error("请勿在代理地址中保存用户名或密码");
+        if (candidate.length > 300) throw new Error("代理地址过长");
+        return candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+    } catch (error) {
+        if (strict) throw error;
+        return "";
+    }
 }
 
 function normalizeSettings(value) {
@@ -62,7 +81,7 @@ function normalizeSettings(value) {
     const floatingBallSize = Number.isFinite(parsed)
         ? Math.min(FLOATING_BALL_MAX, Math.max(FLOATING_BALL_MIN, parsed))
         : FLOATING_BALL_DEFAULT;
-    return { floatingBallSize };
+    return { floatingBallSize, networkOptimization: source.networkOptimization !== false, gitProxy: normalizeGitProxy(source.gitProxy) };
 }
 
 function normalizeMetadataMap(value) {
@@ -94,7 +113,7 @@ function normalizeWhitelist(value) {
 function normalizeData(value) {
     const source = isObject(value) ? value : {};
     return {
-        schemaVersion: 4,
+        schemaVersion: 5,
         updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
         extensions: normalizeMetadataMap(source.extensions),
         backendPlugins: normalizeMetadataMap(source.backendPlugins),
@@ -148,18 +167,48 @@ async function writeData(req, input) {
     return normalized;
 }
 
-async function runGitIn(directory, args) {
-    const result = await execFileAsync('git', ['-C', directory, ...args], {
+async function runGitIn(directory, args, options = {}) {
+    const commandArgs = options.gitProxy ? ['-c', `http.proxy=${options.gitProxy}`, '-C', directory, ...args] : ['-C', directory, ...args];
+    const result = await execFileAsync('git', commandArgs, {
         cwd: directory,
-        timeout: GIT_TIMEOUT_MS,
+        timeout: options.timeout || GIT_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
         windowsHide: true,
     });
     return { stdout: String(result.stdout || '').trim(), stderr: String(result.stderr || '').trim() };
 }
 
-async function runGit(args) {
-    return runGitIn(__dirname, args);
+function isTransientGitError(error) {
+    if (error && (error.killed || error.signal === "SIGTERM")) return true;
+    const code = String(error && error.code || "").toUpperCase();
+    if (["ETIMEDOUT", "ESOCKETTIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"].includes(code)) return true;
+    const message = String(error && (error.stderr || error.message) || error).toLowerCase();
+    return ["timed out", "timeout", "connection", "could not resolve", "remote end hung up", "http 429", "http 500", "http 502", "http 503", "http 504", "network"].some(part => message.includes(part));
+}
+
+function wait(delay) {
+    return new Promise(resolve => setTimeout(resolve, delay));
+}
+
+async function fetchGitRemote(directory, settings = {}) {
+    const optimized = settings.networkOptimization !== false;
+    const delays = optimized ? NETWORK_RETRY_DELAYS : [];
+    const options = {
+        gitProxy: normalizeGitProxy(settings.gitProxy),
+        timeout: optimized ? OPTIMIZED_GIT_TIMEOUT_MS : GIT_TIMEOUT_MS,
+    };
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            return await runGitIn(directory, ["fetch", "--quiet", "origin"], options);
+        } catch (error) {
+            if (attempt >= delays.length || !isTransientGitError(error)) throw error;
+            await wait(delays[attempt]);
+        }
+    }
+}
+
+async function runGit(args, options = {}) {
+    return runGitIn(__dirname, args, options);
 }
 
 function githubAuthorFromRepository(value) {
@@ -171,7 +220,7 @@ function githubAuthorFromRepository(value) {
     return match ? match[1] : '';
 }
 
-async function getGitInfoFor(directory, fetchRemote = true) {
+async function getGitInfoFor(directory, fetchRemote = true, settings = {}) {
     let inside;
     try {
         inside = await runGitIn(directory, ['rev-parse', '--is-inside-work-tree']);
@@ -196,7 +245,7 @@ async function getGitInfoFor(directory, fetchRemote = true) {
     const localCommit = (await runGitIn(directory, ['rev-parse', 'HEAD'])).stdout;
     if (fetchRemote) {
         try {
-            await runGitIn(directory, ['fetch', '--quiet', 'origin']);
+            await fetchGitRemote(directory, settings);
         } catch (error) {
             throw Object.assign(new Error('无法获取远端版本，请检查网络和 origin 配置'), { code: 'remote_unavailable' });
         }
@@ -223,8 +272,8 @@ async function getGitInfoFor(directory, fetchRemote = true) {
     };
 }
 
-async function getGitInfo(fetchRemote = true) {
-    return getGitInfoFor(__dirname, fetchRemote);
+async function getGitInfo(fetchRemote = true, settings = {}) {
+    return getGitInfoFor(__dirname, fetchRemote, settings);
 }
 
 async function readOptionalJson(filePath) {
@@ -267,12 +316,27 @@ function publicGitInfo(git) {
     return githubAuthor ? { ...safe, githubAuthor } : safe;
 }
 
-async function inspectServerPlugin(pluginId, directory, checkUpdates) {
+async function mapWithConcurrency(items, concurrency, worker) {
+    if (!items.length) return [];
+    const results = new Array(items.length);
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (cursor < items.length) {
+            const index = cursor;
+            cursor += 1;
+            results[index] = await worker(items[index]);
+        }
+    }));
+    return results;
+}
+
+async function inspectServerPlugin(pluginId, directory, checkUpdates, settings = {}) {
     const plugin = await readServerPlugin(pluginId, directory);
     if (!plugin) return null;
     if (!checkUpdates) return { ...plugin, updateSupported: null, isUpToDate: null };
     try {
-        return { ...plugin, ...publicGitInfo(await getGitInfoFor(directory, true)) };
+        return { ...plugin, ...publicGitInfo(await getGitInfoFor(directory, true, settings)) };
     } catch (error) {
         return {
             ...plugin,
@@ -284,13 +348,14 @@ async function inspectServerPlugin(pluginId, directory, checkUpdates) {
     }
 }
 
-async function scanServerPlugins(checkUpdates = true, pluginIds = null) {
+async function scanServerPlugins(checkUpdates = true, pluginIds = null, settings = {}) {
     const requested = Array.isArray(pluginIds) ? new Set(pluginIds) : null;
     const entries = await fsp.readdir(PLUGINS_DIR, { withFileTypes: true });
     const candidates = entries
         .filter(entry => entry.isDirectory() && PLUGIN_ID_PATTERN.test(entry.name) && (!requested || requested.has(entry.name)))
         .map(entry => ({ id: entry.name, directory: path.join(PLUGINS_DIR, entry.name) }));
-    const plugins = await Promise.all(candidates.map(candidate => inspectServerPlugin(candidate.id, candidate.directory, checkUpdates)));
+    const concurrency = checkUpdates && settings.networkOptimization !== false ? NETWORK_DETECTION_CONCURRENCY : candidates.length;
+    const plugins = await mapWithConcurrency(candidates, concurrency, candidate => inspectServerPlugin(candidate.id, candidate.directory, checkUpdates, settings));
     return plugins.filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans') || a.id.localeCompare(b.id));
 }
 
@@ -307,11 +372,11 @@ async function resolveServerPlugin(pluginId) {
     return { id, directory, plugin };
 }
 
-async function updateServerPlugin(pluginId) {
+async function updateServerPlugin(pluginId, settings = {}) {
     const target = await resolveServerPlugin(pluginId);
-    const before = await getGitInfoFor(target.directory, true);
+    const before = await getGitInfoFor(target.directory, true, settings);
     if (before.isUpToDate) return { target, before, after: before, output: 'Already up to date.', updated: false };
-    const pull = await runGitIn(target.directory, ['pull', '--ff-only']);
+    const pull = await runGitIn(target.directory, ['pull', '--ff-only'], { gitProxy: normalizeGitProxy(settings.gitProxy), timeout: settings.networkOptimization !== false ? OPTIMIZED_GIT_TIMEOUT_MS : GIT_TIMEOUT_MS });
     const after = await getGitInfoFor(target.directory, false);
     return {
         target,
@@ -350,7 +415,7 @@ async function init(router) {
                 res.set('Cache-Control', 'no-store');
                 return res.json({ ok: true, version: packageInfo.version, ignored: true, updateSupported: false, isUpToDate: true });
             }
-            const git = await getGitInfo(true);
+            const git = await getGitInfo(true, data.settings);
             res.set('Cache-Control', 'no-store');
             res.json({ ok: true, version: packageInfo.version, ...git });
         } catch (error) {
@@ -366,9 +431,9 @@ async function init(router) {
             const data = await readData(req);
             if (data.whitelist.backend.includes(info.id)) return sendError(res, 409, '扩展管理器后端已加入白名单', 'plugin_whitelisted');
             const result = await enqueueUpdate(async () => {
-                const before = await getGitInfo(true);
+                const before = await getGitInfo(true, data.settings);
                 if (before.isUpToDate) return { before, after: before, output: 'Already up to date.' };
-                const pull = await runGit(['pull', '--ff-only']);
+                const pull = await runGit(['pull', '--ff-only'], { gitProxy: data.settings.gitProxy, timeout: data.settings.networkOptimization ? OPTIMIZED_GIT_TIMEOUT_MS : GIT_TIMEOUT_MS });
                 const after = await getGitInfo(false);
                 return { before, after, output: pull.stdout || pull.stderr };
             });
@@ -400,7 +465,7 @@ async function init(router) {
                 const data = await readData(req);
                 const ignored = new Set(data.whitelist.backend);
                 const installed = await scanServerPlugins(false);
-                const checked = await scanServerPlugins(true, installed.filter(plugin => !ignored.has(plugin.id)).map(plugin => plugin.id));
+                const checked = await scanServerPlugins(true, installed.filter(plugin => !ignored.has(plugin.id)).map(plugin => plugin.id), data.settings);
                 const checkedById = new Map(checked.map(plugin => [plugin.id, plugin]));
                 plugins = installed.map(plugin => ignored.has(plugin.id) ? { ...plugin, ignored: true } : (checkedById.get(plugin.id) || plugin));
             } else {
@@ -424,7 +489,7 @@ async function init(router) {
             const includeWhitelisted = req.body.includeWhitelisted === true;
             const ignoredIds = includeWhitelisted ? [] : pluginIds.filter(id => data.whitelist.backend.includes(id));
             const targets = includeWhitelisted ? pluginIds : pluginIds.filter(id => !data.whitelist.backend.includes(id));
-            const plugins = targets.length ? await scanServerPlugins(true, targets) : [];
+            const plugins = targets.length ? await scanServerPlugins(true, targets, data.settings) : [];
             res.set('Cache-Control', 'no-store');
             res.json({ ok: true, plugins, pluginCount: plugins.length, ignoredIds });
         } catch (error) {
@@ -439,7 +504,7 @@ async function init(router) {
         try {
             const data = await readData(req);
             if (data.whitelist.backend.includes(pluginId) && req.body.includeWhitelisted !== true) return sendError(res, 409, '该后端插件已加入白名单', 'plugin_whitelisted');
-            const result = await enqueueUpdate(() => updateServerPlugin(pluginId));
+            const result = await enqueueUpdate(() => updateServerPlugin(pluginId, data.settings));
             const plugin = await readServerPlugin(result.target.id, result.target.directory);
             res.json({
                 ok: true,
