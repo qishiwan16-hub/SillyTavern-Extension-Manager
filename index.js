@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.17.1';
+    const SCRIPT_VERSION = '1.17.2';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -2905,8 +2905,8 @@
             #st-extension-manager-overlay .em-settings .em-whitelist-setting-status { font-size: .76em; opacity: .7; }
             #st-extension-manager-overlay .em-settings .em-whitelist-setting-status.error { color: #b94e55; opacity: 1; }
             #st-extension-manager-overlay .em-network-settings { padding-bottom: 12px; border-bottom: 1px solid var(--em-line-soft); display: flex; flex-direction: column; gap: 10px; }
-            #st-extension-manager-overlay .em-install label.em-setting-toggle { width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) 42px; grid-template-rows: auto; align-items: center; column-gap: 12px; cursor: pointer; opacity: 1; }
-            #st-extension-manager-overlay .em-setting-toggle > input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
+            #st-extension-manager-overlay .em-install label.em-setting-toggle { position: relative; width: 100%; min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) 42px; grid-template-rows: auto; align-items: center; column-gap: 12px; cursor: pointer; opacity: 1; }
+            #st-extension-manager-overlay .em-setting-toggle > input { position: absolute; z-index: 2; inset-block-start: 50%; inset-inline-end: 0; inline-size: 42px; block-size: 24px; margin: 0; opacity: 0; cursor: pointer; transform: translateY(-50%); }
             #st-extension-manager-overlay .em-setting-toggle > .em-setting-copy { grid-column: 1; grid-row: 1; text-align: left; }
             #st-extension-manager-overlay .em-setting-toggle > .em-switch-track { grid-column: 2; grid-row: 1; box-sizing: border-box; width: 42px; min-width: 42px; max-width: 42px; height: 24px; min-height: 24px; max-height: 24px; margin: 0; padding: 3px; border: 1px solid var(--em-line); border-radius: 999px; background: var(--em-control); justify-self: end; overflow: hidden; transition: background-color .16s ease, border-color .16s ease; }
             #st-extension-manager-overlay .em-switch-track > span { display: block; box-sizing: border-box; width: 16px; min-width: 16px; max-width: 16px; height: 16px; min-height: 16px; max-height: 16px; margin: 0; border-radius: 50%; background: currentColor; opacity: .68; transition: transform .16s ease, opacity .16s ease; }
@@ -3868,6 +3868,15 @@
             } catch (error) {
                 if (window.toastr) toastr.error(`解散失败：${error.message || error}`);
             }
+        });
+        $popup.on('pointerdown', '.em-setting-toggle', function () {
+            const content = $popup.find('.em-content')[0];
+            if (content) $popup.data('em-settings-scroll-top', content.scrollTop);
+        });
+        $popup.on('change', '.em-setting-toggle > input', function () {
+            const content = $popup.find('.em-content')[0];
+            const scrollTop = Number($popup.data('em-settings-scroll-top'));
+            if (content && Number.isFinite(scrollTop)) requestAnimationFrame(() => { content.scrollTop = scrollTop; });
         });
         $popup.on('change', '.em-privacy-masking', function () {
             state.settings = writeLocalSettings(normalizeSettings({ ...state.settings, privacyMasking: this.checked }));
