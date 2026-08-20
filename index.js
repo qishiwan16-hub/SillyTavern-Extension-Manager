@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.16.0';
+    const SCRIPT_VERSION = '1.16.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -1677,19 +1677,6 @@
         return `<div class="em-detection-error"><button type="button" class="em-action em-error-toggle" aria-expanded="false"><i class="fa-solid fa-circle-exclamation"></i> 查看报错</button><div class="em-error-details" hidden><pre>${escapeHtml(error)}</pre><button type="button" class="em-action em-copy-error" data-error-scope="${escapeHtml(scope)}" data-error-id="${escapeHtml(id)}"><i class="fa-solid fa-copy"></i> 一键复制报错</button></div></div>`;
     }
 
-    function repositoryForReport(value) {
-        const candidate = String(value || '').trim();
-        if (!candidate) return '未知';
-        try {
-            const url = new URL(candidate);
-            url.username = '';
-            url.password = '';
-            return url.toString();
-        } catch (error) {
-            return candidate.replace(/^(https?:\/\/)[^/@]+@/i, '$1');
-        }
-    }
-
     function buildErrorReport(scope, id) {
         if (scope === 'backend') {
             const plugin = backendUpdateState.plugins.find(item => item.id === id);
@@ -1701,7 +1688,7 @@
         const update = state.updates.get(id) || {};
         if (!extension) return '';
         const commit = update.shortCommitHash || String(update.currentCommitHash || '').slice(0, 8) || '未知';
-        return ['扩展管理器版本：v' + SCRIPT_VERSION, '类型：前端扩展', '插件：' + extension.displayName, 'ID：' + id, '插件版本：' + (extension.version || '未知'), '提交：' + commit, '仓库：' + repositoryForReport(repoUrl(extension)), '错误：' + (update.error || '未知错误')].join('\n');
+        return ['扩展管理器版本：v' + SCRIPT_VERSION, '类型：前端扩展', '插件：' + extension.displayName, 'ID：' + id, '插件版本：' + (extension.version || '未知'), '提交：' + commit, '错误：' + (update.error || '未知错误')].join('\n');
     }
 
     function renderFaqSolution(value) {
