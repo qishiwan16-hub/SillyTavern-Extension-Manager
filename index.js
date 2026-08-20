@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.17.2';
+    const SCRIPT_VERSION = '1.18.0';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -39,10 +39,11 @@
         solution: '这是 HTTP 访问权限或登录校验拒绝，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n不要优先关闭 CSRF 防护；若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const timers = [];
-    const state = { extensions: [], filter: '', category: '', sort: 'name', checking: false, frontendCheckProgress: { completed: 0, total: 0 }, detectionActive: false, detectionCancelled: false, detectionMessage: '', updating: new Set(), updates: new Map(), checkingExtensions: new Set(), togglingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', groupAction: { group: '', phase: '' }, selectionMode: false, batchUpdating: false, batchToggling: false, batchAction: '', minimized: false, meta: {}, backendMeta: {}, whitelist: { frontend: [], backend: [] }, settings: { floatingBallSize: FLOATING_BALL_DEFAULT, privacyMasking: false, networkOptimization: NETWORK_OPTIMIZATION_DEFAULT, gitProxy: '' }, backendInstallPlatform: 'termux', backend: { available: false, error: '', version: '', supportsBackendMeta: false, supportsWhitelist: false, supportsNetworkOptimization: false } };
+    const state = { extensions: [], filter: '', category: '', sort: 'name', statusSortActive: false, checking: false, frontendCheckProgress: { completed: 0, total: 0 }, detectionActive: false, detectionCancelled: false, detectionMessage: '', updating: new Set(), updates: new Map(), checkingExtensions: new Set(), togglingExtensions: new Set(), selectedExtensions: new Set(), groupPickerSelections: new Set(), expandedGroups: new Set(), groupPicker: '', groupAction: { group: '', phase: '' }, selectionMode: false, batchUpdating: false, batchToggling: false, batchAction: '', minimized: false, meta: {}, backendMeta: {}, whitelist: { frontend: [], backend: [] }, settings: { floatingBallSize: FLOATING_BALL_DEFAULT, privacyMasking: false, networkOptimization: NETWORK_OPTIMIZATION_DEFAULT, gitProxy: '' }, backendInstallPlatform: 'termux', backend: { available: false, error: '', version: '', supportsBackendMeta: false, supportsWhitelist: false, supportsNetworkOptimization: false } };
     const selfUpdateState = { phase: 'idle', message: '点击按钮检查本体更新', canUpdate: false, latestVersion: '', extensionName: EXTENSION_DEFAULT_FOLDER, global: false };
-    const backendUpdateState = { phase: 'idle', message: '读取后端插件后可检测更新', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false, batchAction: '', checkingPlugins: new Set(), checkedPlugins: new Set(), selectedPlugins: new Set(), expandedGroups: new Set(), groupPickerSelections: new Set(), groupPicker: '', groupAction: { group: '', phase: '' }, selectionMode: false, filter: '', category: '', sort: 'name' };
-    const whitelistState = { scope: 'frontend', selected: new Set(), filter: '', category: '', sort: 'name', selectionMode: false, expandedGroups: { frontend: new Set(), backend: new Set() }, groupPicker: '', groupPickerSelections: new Set(), groupAction: { group: '', phase: '' }, batchAction: '' };
+    const backendUpdateState = { phase: 'idle', message: '读取后端插件后可检测更新', canUpdate: false, plugins: [], restartRequired: false, batchUpdating: false, batchAction: '', checkingPlugins: new Set(), checkedPlugins: new Set(), selectedPlugins: new Set(), expandedGroups: new Set(), groupPickerSelections: new Set(), groupPicker: '', groupAction: { group: '', phase: '' }, selectionMode: false, filter: '', category: '', sort: 'name', statusSortActive: false };
+    const whitelistState = { scope: 'frontend', selected: new Set(), filter: '', category: '', sort: 'name', statusSortActive: false, selectionMode: false, expandedGroups: { frontend: new Set(), backend: new Set() }, groupPicker: '', groupPickerSelections: new Set(), groupAction: { group: '', phase: '' }, batchAction: '' };
+    const detectionResults = { active: false, scope: 'frontend', ids: [], filter: '', selected: new Set(), selectionMode: false, allowWhitelisted: false, returnPanel: 'installed', title: '检测结果', action: '', message: '' };
     let extensionApiPromise = null;
     let csrfTokenOverride = '';
     let csrfRefreshPromise = null;
@@ -575,8 +576,8 @@
         if (state.checking || state.batchUpdating || state.batchToggling || !state.extensions.length) return;
         state.checking = true;
         beginDetection($popup);
+        const targets = state.extensions.filter(extension => isExternal(extension) && !isFrontendWhitelisted(extension));
         try {
-            const targets = state.extensions.filter(extension => isExternal(extension) && !isFrontendWhitelisted(extension));
             state.frontendCheckProgress = { completed: 0, total: targets.length };
             const checks = mapDetectionTargets(targets, async extension => {
                 const result = await checkOne(extension);
@@ -594,7 +595,10 @@
             if (!state.detectionCancelled) state.frontendCheckProgress = { completed: state.frontendCheckProgress.total, total: state.frontendCheckProgress.total };
             renderList($popup);
             renderBatchSelection($popup);
+            const showResults = !state.detectionCancelled;
+            state.statusSortActive = true;
             finishDetection($popup);
+            if (showResults) openDetectionResults('frontend', targets.map(folderOf), $popup, { returnPanel: 'installed', title: '前端扩展检测结果' });
         }
     }
 
@@ -625,7 +629,10 @@
             state.checking = false;
             if (!state.detectionCancelled) state.frontendCheckProgress = { completed: state.frontendCheckProgress.total, total: state.frontendCheckProgress.total };
             renderList($popup);
+            const showResults = !state.detectionCancelled;
+            state.statusSortActive = true;
             finishDetection($popup);
+            if (showResults) openDetectionResults('frontend', targets.map(folderOf), $popup, { returnPanel: 'installed', title: '前端失败项重试结果' });
         }
     }
 
@@ -654,7 +661,11 @@
             if (!state.detectionCancelled) state.frontendCheckProgress = { completed: targets.length, total: targets.length };
             renderList($popup);
             if (options.whitelistView) renderWhitelistPanel($popup);
+            const showResults = !state.detectionCancelled;
+            state.statusSortActive = true;
+            if (options.whitelistView) whitelistState.statusSortActive = true;
             finishDetection($popup);
+            if (showResults) openDetectionResults('frontend', targets.map(folderOf), $popup, { allowWhitelisted: options.allowWhitelisted === true, returnPanel: options.whitelistView ? 'whitelist' : 'installed', title: '分组检测结果：' + group });
         }
     }
 
@@ -837,6 +848,13 @@
 
     const backendGroupOf = plugin => String(plugin?.category || '').trim() || '未分组';
 
+    function backendStatusRank(plugin) {
+        if (plugin?.error) return 0;
+        if (backendUpdateState.checkedPlugins.has(plugin.id) && plugin.isUpToDate === false) return 1;
+        if (backendUpdateState.checkedPlugins.has(plugin.id)) return 2;
+        return 3;
+    }
+
     function filteredBackendPlugins() {
         const filter = backendUpdateState.filter.toLowerCase();
         return backendUpdateState.plugins.filter(plugin => {
@@ -845,6 +863,7 @@
             const matchesText = !filter || [plugin.name, plugin.nativeName, plugin.id, plugin.githubAuthor, plugin.description, group].join(' ').toLowerCase().includes(filter);
             return matchesCategory && matchesText;
         }).sort((a, b) => {
+            if (backendUpdateState.statusSortActive) return backendStatusRank(a) - backendStatusRank(b) || a.name.localeCompare(b.name, 'zh-Hans');
             if (backendUpdateState.sort === 'status') {
                 const rank = plugin => backendUpdateState.checkingPlugins.has(plugin.id) || plugin.updating ? 0 : (backendUpdateState.checkedPlugins.has(plugin.id) && plugin.isUpToDate === false ? 1 : (backendUpdateState.checkedPlugins.has(plugin.id) ? 2 : 3));
                 return rank(a) - rank(b) || a.name.localeCompare(b.name, 'zh-Hans');
@@ -878,11 +897,12 @@
 
     function renderBackendPluginCard(plugin, options = {}) {
         const whitelistView = options?.whitelistView === true;
+        const resultView = options?.resultView === true;
         const checked = backendUpdateState.checkedPlugins.has(plugin.id);
         const checking = backendUpdateState.checkingPlugins.has(plugin.id);
         const selected = backendUpdateState.selectedPlugins.has(plugin.id);
         const whitelisted = isBackendWhitelisted(plugin);
-        const ignored = whitelisted && !whitelistView;
+        const ignored = whitelisted && !whitelistView && !resultView;
         const available = !ignored && checked && plugin.updateSupported === true && plugin.isUpToDate === false;
         const status = ignored
             ? '已忽略'
@@ -911,23 +931,27 @@
             plugin.currentBranchName ? '分支：' + escapeHtml(plugin.currentBranchName) : '',
         ].filter(Boolean).join(' · ');
         const whitelistSelected = whitelistState.selected.has(plugin.id);
-        const leading = whitelistView && whitelistState.selectionMode
+        const resultSelected = detectionResults.selected.has(plugin.id);
+        const cardSelected = resultView ? resultSelected : (whitelistView ? whitelistSelected : selected);
+        const leading = resultView && detectionResults.selectionMode
+            ? '<label class="em-card-choice' + (resultSelected ? ' is-selected' : '') + '" title="选择 ' + escapeHtml(plugin.name) + '"><input class="em-result-card-choice" type="checkbox" data-result-id="' + escapeHtml(plugin.id) + '"' + (resultSelected ? ' checked' : '') + '><i class="fa-solid fa-check"></i></label>'
+            : whitelistView && whitelistState.selectionMode
             ? '<label class="em-card-choice' + (whitelistSelected ? ' is-selected' : '') + '" title="选择 ' + escapeHtml(plugin.name) + '"><input class="em-whitelist-card-choice" type="checkbox" data-whitelist-id="' + escapeHtml(plugin.id) + '"' + (whitelistSelected ? ' checked' : '') + '><i class="fa-solid fa-check"></i></label>'
             : backendUpdateState.selectionMode && !whitelistView
                 ? '<label class="em-card-choice' + (selected ? ' is-selected' : '') + '" title="选择 ' + escapeHtml(plugin.name) + '"><input type="checkbox" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (selected ? ' checked' : '') + '><i class="fa-solid fa-check"></i></label>'
             : '<div class="em-card-icon"><i class="fa-solid fa-server"></i></div>';
         const note = plugin.description || '暂无备注';
-        return '<article class="em-card em-backend-card' + (available ? ' is-update' : '') + (ignored ? ' is-ignored' : '') + ((whitelistView ? whitelistSelected : selected) ? ' is-selected' : '') + '" data-plugin-id="' + escapeHtml(plugin.id) + '">' +
+        return '<article class="em-card em-backend-card' + (available ? ' is-update' : '') + (plugin.error ? ' is-error' : '') + (ignored ? ' is-ignored' : '') + (cardSelected ? ' is-selected' : '') + '" data-plugin-id="' + escapeHtml(plugin.id) + '">' +
             leading +
             '<div class="em-card-body">' +
                 '<div class="em-card-head"><div class="em-card-title">' + escapeHtml(plugin.name) + (plugin.isManager ? ' <span class="em-type">管理后端</span>' : '') + (backendGroupOf(plugin) !== '未分组' ? ' <span class="em-category">' + escapeHtml(backendGroupOf(plugin)) + '</span>' : '') + '</div><span class="em-status ' + statusClass + '">' + escapeHtml(status) + '</span></div>' +
                 '<div class="em-card-sub">' + (details || '<span class="em-private">' + escapeHtml(plugin.id) + '</span>') + '</div>' +
                 '<div class="em-card-note">' + escapeHtml(note) + '</div>' +
                 '<div class="em-card-actions">' +
-                    (whitelistView ? '' : (state.backend.supportsBackendMeta ? '<button type="button" class="em-action em-backend-edit" data-plugin-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>' : '')) +
-                    (whitelistView ? '<button type="button" class="em-action em-whitelist-check-backend" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating || backendUpdateState.batchUpdating || ['loading', 'checking', 'updating'].includes(backendUpdateState.phase) ? ' disabled' : '') + '><i class="fa-solid ' + (checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass') + '"></i> ' + (checking ? '检测中' : '检测') + '</button>' : (whitelisted ? '<span class="em-action muted"><i class="fa-solid fa-shield-halved"></i> 白名单</span>' : '<button type="button" class="em-action em-check-backend-plugin" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating || backendUpdateState.batchUpdating || ['loading', 'checking', 'updating'].includes(backendUpdateState.phase) ? ' disabled' : '') + '><i class="fa-solid ' + (checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass') + '"></i> ' + (checking ? '检测中' : '检测') + '</button>')) +
-                    (available ? '<button type="button" class="em-action primary ' + (whitelistView ? 'em-whitelist-update-backend' : 'em-update-backend-plugin') + '" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (plugin.updating || backendUpdateState.batchUpdating ? ' disabled' : '') + '><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button>' : '') +
-                    (whitelistView ? '<button type="button" class="em-action em-whitelist-remove-one" data-scope="backend" data-whitelist-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-shield"></i> 移出白名单</button>' : '') +
+                    (resultView ? '' : (whitelistView ? '' : (state.backend.supportsBackendMeta ? '<button type="button" class="em-action em-backend-edit" data-plugin-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>' : ''))) +
+                    (resultView ? '<button type="button" class="em-action em-result-check-one" data-result-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating ? ' disabled' : '') + '><i class="fa-solid ' + (checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass') + '"></i> ' + (checking ? '检测中' : '检测') + '</button>' : (whitelistView ? '<button type="button" class="em-action em-whitelist-check-backend" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating || backendUpdateState.batchUpdating || ['loading', 'checking', 'updating'].includes(backendUpdateState.phase) ? ' disabled' : '') + '><i class="fa-solid ' + (checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass') + '"></i> ' + (checking ? '检测中' : '检测') + '</button>' : (whitelisted ? '<span class="em-action muted"><i class="fa-solid fa-shield-halved"></i> 白名单</span>' : '<button type="button" class="em-action em-check-backend-plugin" data-plugin-id="' + escapeHtml(plugin.id) + '"' + (checking || plugin.updating || backendUpdateState.batchUpdating || ['loading', 'checking', 'updating'].includes(backendUpdateState.phase) ? ' disabled' : '') + '><i class="fa-solid ' + (checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass') + '"></i> ' + (checking ? '检测中' : '检测') + '</button>'))) +
+                    (available ? '<button type="button" class="em-action primary ' + (resultView ? 'em-result-update-one' : (whitelistView ? 'em-whitelist-update-backend' : 'em-update-backend-plugin')) + '" ' + (resultView ? 'data-result-id' : 'data-plugin-id') + '="' + escapeHtml(plugin.id) + '"' + (plugin.updating || backendUpdateState.batchUpdating ? ' disabled' : '') + '><i class="fa-solid ' + (plugin.updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down') + '"></i> ' + (plugin.updating ? '更新中' : '更新') + '</button>' : '') +
+                    (!resultView && whitelistView ? '<button type="button" class="em-action em-whitelist-remove-one" data-scope="backend" data-whitelist-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-shield"></i> 移出白名单</button>' : '') +
                 '</div>' +
                 renderErrorDetails(plugin.error, 'backend', plugin.id) +
                 '<div class="em-editor em-backend-editor" data-backend-editor="' + escapeHtml(plugin.id) + '" hidden><label>中文名<input class="em-backend-name-input" value="' + escapeHtml(backendMetadata(plugin.id).name || '') + '" maxlength="80"></label><label>分组<input class="em-backend-category-input" value="' + escapeHtml(plugin.category || '') + '" maxlength="80" placeholder="输入名称即可形成分组文件夹"></label><label>备注<textarea class="em-backend-note-input" maxlength="500">' + escapeHtml(plugin.note || '') + '</textarea></label><button type="button" class="em-save-meta primary em-backend-save-meta" data-plugin-id="' + escapeHtml(plugin.id) + '"><i class="fa-solid fa-floppy-disk"></i> 保存</button></div>' +
@@ -1024,6 +1048,7 @@
         $popup.find('.em-update-backend').prop('hidden', !backendUpdateState.canUpdate && backendUpdateState.phase !== 'updating').prop('disabled', backendUpdateState.batchUpdating || backendUpdateState.phase === 'updating').html(backendUpdateState.phase === 'updating' ? '<i class="fa-solid fa-spinner fa-spin"></i> 更新中' : '<i class="fa-solid fa-cloud-arrow-down"></i> 更新全部');
         renderBackendPluginList($popup);
         renderBackendPanel($popup);
+        if (detectionResults.active) renderDetectionResults($popup);
     }
 
     async function loadLegacyBackendPlugin() {
@@ -1092,6 +1117,7 @@
             if (window.toastr) toastr.info('请选择需要检测的后端插件');
             return backendUpdateState;
         }
+        const returnPanel = String($popup.find('.em-panel.active').attr('data-panel') || 'backend');
         backendUpdateState.phase = 'checking';
         backendUpdateState.message = '正在检测后端插件 0 / ' + ids.length;
         beginDetection($popup);
@@ -1166,7 +1192,11 @@
             backendUpdateState.checkingPlugins.clear();
             renderBackendUpdate($popup);
             if (options.whitelistView) renderWhitelistPanel($popup);
+            const showResults = options.showResults === true && !state.detectionCancelled;
+            backendUpdateState.statusSortActive = options.showResults === true || backendUpdateState.statusSortActive;
+            if (options.whitelistView && options.showResults === true) whitelistState.statusSortActive = true;
             finishDetection($popup);
+            if (showResults) openDetectionResults('backend', ids, $popup, { allowWhitelisted: options.allowWhitelisted === true, returnPanel: options.returnPanel || returnPanel, title: options.resultTitle || '后端插件检测结果' });
         }
         return backendUpdateState;
     }
@@ -1181,12 +1211,12 @@
             if (window.toastr) toastr.info('当前没有检测失败的后端插件');
             return backendUpdateState;
         }
-        return checkBackendPlugins(ids, $popup);
+        return checkBackendPlugins(ids, $popup, { showResults: true, returnPanel: 'backend', resultTitle: '后端失败项重试结果' });
     }
 
     async function checkBackendUpdate($popup) {
         await loadBackendPlugins($popup);
-        return checkBackendPlugins(backendUpdateState.plugins.map(plugin => plugin.id), $popup);
+        return checkBackendPlugins(backendUpdateState.plugins.map(plugin => plugin.id), $popup, { showResults: true, returnPanel: 'backend', resultTitle: '后端插件检测结果' });
     }
 
     async function checkBackendGroup(group, $popup, options = {}) {
@@ -1194,7 +1224,7 @@
         const ids = backendUpdateState.plugins.filter(plugin => backendGroupOf(plugin) === group && (options.allowWhitelisted || !isBackendWhitelisted(plugin))).map(plugin => plugin.id);
         if (!ids.length) { if (window.toastr) toastr.info('此分组没有可检测的后端插件'); return; }
         actionState.groupAction = { group, phase: 'checking' };
-        try { await checkBackendPlugins(ids, $popup, { allowWhitelisted: options.allowWhitelisted === true, whitelistView: options.whitelistView === true }); }
+        try { await checkBackendPlugins(ids, $popup, { allowWhitelisted: options.allowWhitelisted === true, whitelistView: options.whitelistView === true, showResults: true, returnPanel: options.whitelistView ? 'whitelist' : 'backend', resultTitle: '后端分组检测结果：' + group }); }
         finally { actionState.groupAction = { group: '', phase: '' }; renderBackendPluginList($popup); if (options.whitelistView) renderWhitelistPanel($popup); }
     }
 
@@ -1212,7 +1242,7 @@
     }
 
     async function checkSelectedBackendPlugins($popup) {
-        return checkBackendPlugins(Array.from(backendUpdateState.selectedPlugins), $popup);
+        return checkBackendPlugins(Array.from(backendUpdateState.selectedPlugins), $popup, { showResults: true, returnPanel: 'backend', resultTitle: '所选后端插件检测结果' });
     }
 
     async function updateBackendPlugin(pluginId, $popup, options = {}) {
@@ -1440,6 +1470,7 @@
             state.updating.delete(folder);
             if (!options.deferRender) renderList($popup);
             if (!options.deferSelectionRender) renderBatchSelection($popup);
+            if (detectionResults.active) renderDetectionResults($popup);
         }
         return success;
     }
@@ -1473,7 +1504,10 @@
         } finally {
             state.checking = false;
             renderList($popup);
+            const showResults = !state.detectionCancelled;
+            state.statusSortActive = true;
             finishDetection($popup);
+            if (showResults) openDetectionResults('frontend', targets.map(folderOf), $popup, { returnPanel: 'installed', title: '所选前端扩展检测结果' });
         }
     }
 
@@ -1557,6 +1591,14 @@
         }
     }
 
+    function frontendStatusRank(extension) {
+        const update = state.updates.get(folderOf(extension));
+        if (update?.error) return 0;
+        if (update?.isUpToDate === false) return 1;
+        if (update?.isUpToDate === true) return 2;
+        return 3;
+    }
+
     function filteredExtensions() {
         const filter = state.filter.toLowerCase();
         return state.extensions.filter(extension => {
@@ -1565,6 +1607,7 @@
             const matchesText = !filter || [extension.displayName, extension.name, extension.description, group, repoUrl(extension)].join(' ').toLowerCase().includes(filter);
             return matchesCategory && matchesText;
         }).sort((a, b) => {
+            if (state.statusSortActive) return frontendStatusRank(a) - frontendStatusRank(b) || a.displayName.localeCompare(b.displayName, 'zh-Hans');
             if (state.sort === 'type') return typeOf(a).localeCompare(typeOf(b)) || a.displayName.localeCompare(b.displayName, 'zh-Hans');
             return a.displayName.localeCompare(b.displayName, 'zh-Hans');
         });
@@ -1721,13 +1764,14 @@
 
     function renderCard(extension, options = {}) {
         const whitelistView = options?.whitelistView === true;
+        const resultView = options?.resultView === true;
         const folder = folderOf(extension);
         const update = state.updates.get(folder) || {};
         const checking = state.checkingExtensions.has(folder);
         const updating = state.updating.has(folder);
         const toggling = state.togglingExtensions.has(folder);
         const whitelisted = isFrontendWhitelisted(folder);
-        const ignored = whitelisted && !whitelistView;
+        const ignored = whitelisted && !whitelistView && !resultView;
         const available = !ignored && update.isUpToDate === false;
         const repo = repoUrl(extension);
         const githubAuthor = githubAuthorFromRepository(repo);
@@ -1742,12 +1786,16 @@
             : `<input class="em-category-input" value="${escapeHtml(extension.category || '')}" maxlength="80" placeholder="输入名称即可形成分组文件夹">`;
         const selected = state.selectedExtensions.has(folder);
         const whitelistSelected = whitelistState.selected.has(folder);
-        const leading = whitelistView && whitelistState.selectionMode
+        const resultSelected = detectionResults.selected.has(folder);
+        const cardSelected = resultView ? resultSelected : (whitelistView ? whitelistSelected : selected);
+        const leading = resultView && detectionResults.selectionMode
+            ? `<label class="em-card-choice ${resultSelected ? 'is-selected' : ''}" title="选择 ${escapeHtml(extension.displayName)}"><input class="em-result-card-choice" type="checkbox" data-result-id="${escapeHtml(folder)}" ${resultSelected ? 'checked' : ''}><i class="fa-solid fa-check"></i></label>`
+            : whitelistView && whitelistState.selectionMode
             ? `<label class="em-card-choice ${whitelistSelected ? 'is-selected' : ''}" title="选择 ${escapeHtml(extension.displayName)}"><input class="em-whitelist-card-choice" type="checkbox" data-whitelist-id="${escapeHtml(folder)}" ${whitelistSelected ? 'checked' : ''}><i class="fa-solid fa-check"></i></label>`
             : state.selectionMode && typeOf(extension) !== 'system'
                 ? `<label class="em-card-choice ${selected ? 'is-selected' : ''}" title="选择 ${escapeHtml(extension.displayName)}"><input type="checkbox" data-folder="${escapeHtml(folder)}" ${selected ? 'checked' : ''}><i class="fa-solid fa-check"></i></label>`
             : '<div class="em-card-icon"><i class="fa-solid fa-puzzle-piece"></i></div>';
-        return `<article class="em-card ${available ? 'is-update' : ''} ${ignored ? 'is-ignored' : ''} ${extension.enabled ? '' : 'is-disabled'} ${(whitelistView ? whitelistSelected : selected) ? 'is-selected' : ''}" data-folder="${escapeHtml(folder)}">
+        return `<article class="em-card ${available ? 'is-update' : ''} ${update.error ? 'is-error' : ''} ${ignored ? 'is-ignored' : ''} ${extension.enabled ? '' : 'is-disabled'} ${cardSelected ? 'is-selected' : ''}" data-folder="${escapeHtml(folder)}">
             ${leading}
             <div class="em-card-body">
                 <div class="em-card-head"><div class="em-card-title">${escapeHtml(extension.displayName)} <span class="em-type">${escapeHtml(typeLabel)}</span>${group !== '未分组' ? ` <span class="em-category">${escapeHtml(group)}</span>` : ''}</div><span class="em-status ${update.error ? 'error' : (available ? 'update' : (ignored ? 'ignored' : ''))}">${escapeHtml(status)}</span></div>
@@ -1755,13 +1803,221 @@
                 <div class="em-card-note">${escapeHtml(extension.description)}</div>
                 <div class="em-card-actions">
                     ${repo ? `<a class="em-action" href="${safeRepo}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-code-branch"></i> 仓库</a>` : '<span class="em-action muted"><i class="fa-solid fa-code-branch"></i> 暂无仓库</span>'}
-                    ${whitelistView ? '' : `<button type="button" class="em-action em-edit" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>`}
-                    ${whitelistView ? `<button type="button" class="em-action em-whitelist-check-frontend" data-folder="${escapeHtml(folder)}" ${checking || updating ? 'disabled' : ''}><i class="fa-solid ${checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass'}"></i> ${checking ? '检测中' : '检测'}</button>${available || updating ? `<button type="button" class="em-action primary em-whitelist-update-frontend" data-folder="${escapeHtml(folder)}" ${updating ? 'disabled' : ''}><i class="fa-solid ${updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}"></i> ${updating ? '更新中' : '更新'}</button>` : ''}<button type="button" class="em-action em-whitelist-remove-one" data-scope="frontend" data-whitelist-id="${escapeHtml(folder)}"><i class="fa-solid fa-shield"></i> 移出白名单</button>` : (isExternal(extension) ? `<button type="button" class="em-action em-toggle" data-folder="${escapeHtml(folder)}" data-enable="${extension.enabled ? 'false' : 'true'}" ${toggling ? 'disabled' : ''}><i class="fa-solid ${toggling ? 'fa-spinner fa-spin' : 'fa-power-off'}"></i> ${toggling ? '处理中' : (extension.enabled ? '禁用' : '启用')}</button>${whitelisted ? '<span class="em-action muted"><i class="fa-solid fa-shield-halved"></i> 白名单</span>' : `<button type="button" class="em-action em-check" data-folder="${escapeHtml(folder)}" ${checking || updating ? 'disabled' : ''}><i class="fa-solid ${checking ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}"></i> ${checking ? '检测中' : '检查'}</button>${available || updating ? `<button type="button" class="em-action primary em-update" data-folder="${escapeHtml(folder)}" ${updating ? 'disabled' : ''}><i class="fa-solid ${updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}"></i> ${updating ? '更新中' : '更新'}</button>` : ''}`}` : '')}
+                    ${resultView ? '' : (whitelistView ? '' : `<button type="button" class="em-action em-edit" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-tags"></i> 中文资料与分组</button>`)}
+                    ${resultView ? `<button type="button" class="em-action em-result-check-one" data-result-id="${escapeHtml(folder)}" ${checking || updating ? 'disabled' : ''}><i class="fa-solid ${checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass'}"></i> ${checking ? '检测中' : '检测'}</button>${available || updating ? `<button type="button" class="em-action primary em-result-update-one" data-result-id="${escapeHtml(folder)}" ${updating ? 'disabled' : ''}><i class="fa-solid ${updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}"></i> ${updating ? '更新中' : '更新'}</button>` : ''}<button type="button" class="em-action em-result-toggle-one" data-result-id="${escapeHtml(folder)}" data-enable="${extension.enabled ? 'false' : 'true'}" ${toggling ? 'disabled' : ''}><i class="fa-solid ${toggling ? 'fa-spinner fa-spin' : 'fa-power-off'}"></i> ${toggling ? '处理中' : (extension.enabled ? '禁用' : '启用')}</button>` : (whitelistView ? `<button type="button" class="em-action em-whitelist-check-frontend" data-folder="${escapeHtml(folder)}" ${checking || updating ? 'disabled' : ''}><i class="fa-solid ${checking ? 'fa-spinner fa-spin' : 'fa-magnifying-glass'}"></i> ${checking ? '检测中' : '检测'}</button>${available || updating ? `<button type="button" class="em-action primary em-whitelist-update-frontend" data-folder="${escapeHtml(folder)}" ${updating ? 'disabled' : ''}><i class="fa-solid ${updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}"></i> ${updating ? '更新中' : '更新'}</button>` : ''}<button type="button" class="em-action em-whitelist-remove-one" data-scope="frontend" data-whitelist-id="${escapeHtml(folder)}"><i class="fa-solid fa-shield"></i> 移出白名单</button>` : (isExternal(extension) ? `<button type="button" class="em-action em-toggle" data-folder="${escapeHtml(folder)}" data-enable="${extension.enabled ? 'false' : 'true'}" ${toggling ? 'disabled' : ''}><i class="fa-solid ${toggling ? 'fa-spinner fa-spin' : 'fa-power-off'}"></i> ${toggling ? '处理中' : (extension.enabled ? '禁用' : '启用')}</button>${whitelisted ? '<span class="em-action muted"><i class="fa-solid fa-shield-halved"></i> 白名单</span>' : `<button type="button" class="em-action em-check" data-folder="${escapeHtml(folder)}" ${checking || updating ? 'disabled' : ''}><i class="fa-solid ${checking ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}"></i> ${checking ? '检测中' : '检查'}</button>${available || updating ? `<button type="button" class="em-action primary em-update" data-folder="${escapeHtml(folder)}" ${updating ? 'disabled' : ''}><i class="fa-solid ${updating ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}"></i> ${updating ? '更新中' : '更新'}</button>` : ''}`}` : ''))}
                 </div>
                 ${renderErrorDetails(update.error, 'frontend', folder)}
                 <div class="em-editor" data-editor="${escapeHtml(folder)}" hidden><label>中文名<input class="em-name-input" value="${escapeHtml(extension.zhName || '')}" maxlength="80"></label><label>分组${groupInput}</label><label>备注<textarea class="em-note-input" maxlength="500">${escapeHtml(extension.note || '')}</textarea></label><button type="button" class="em-save-meta primary" data-folder="${escapeHtml(folder)}"><i class="fa-solid fa-floppy-disk"></i> 保存</button></div>
             </div>
         </article>`;
+    }
+
+    function detectionResultEntities() {
+        if (detectionResults.scope === 'backend') {
+            const byId = new Map(backendUpdateState.plugins.map(plugin => [plugin.id, plugin]));
+            return detectionResults.ids.map(id => byId.get(id)).filter(Boolean);
+        }
+        const byId = new Map(state.extensions.map(extension => [folderOf(extension), extension]));
+        return detectionResults.ids.map(id => byId.get(id)).filter(Boolean);
+    }
+
+    function detectionResultRank(entity) {
+        return detectionResults.scope === 'backend' ? backendStatusRank(entity) : frontendStatusRank(entity);
+    }
+
+    function filteredDetectionResults() {
+        const filter = detectionResults.filter.trim().toLowerCase();
+        return detectionResultEntities().filter(entity => {
+            if (!filter) return true;
+            if (detectionResults.scope === 'backend') return [entity.name, entity.nativeName, entity.id, entity.githubAuthor, entity.description].join(' ').toLowerCase().includes(filter);
+            return [entity.displayName, folderOf(entity), entity.description, repoUrl(entity)].join(' ').toLowerCase().includes(filter);
+        }).sort((a, b) => detectionResultRank(a) - detectionResultRank(b) || String(detectionResults.scope === 'backend' ? a.name : a.displayName).localeCompare(String(detectionResults.scope === 'backend' ? b.name : b.displayName), 'zh-Hans'));
+    }
+
+    function detectionResultCounts(entities = detectionResultEntities()) {
+        const failed = entities.filter(entity => detectionResultRank(entity) === 0).length;
+        const available = entities.filter(entity => detectionResultRank(entity) === 1 && (detectionResults.scope !== 'frontend' || folderOf(entity).toLowerCase() !== getInstalledExtensionName().toLowerCase())).length;
+        const latest = entities.filter(entity => detectionResultRank(entity) === 2).length;
+        return { failed, available, latest };
+    }
+
+    function openDetectionResults(scope, ids, $popup, options = {}) {
+        const normalizedScope = scope === 'backend' ? 'backend' : 'frontend';
+        const existing = new Set((normalizedScope === 'backend' ? backendUpdateState.plugins.map(plugin => plugin.id) : state.extensions.map(folderOf)));
+        const normalizedIds = Array.from(new Set(ids || [])).filter(id => existing.has(id));
+        if (!normalizedIds.length) return;
+        const activePanel = String($popup.find('.em-panel.active').attr('data-panel') || 'installed');
+        detectionResults.active = true;
+        detectionResults.scope = normalizedScope;
+        detectionResults.ids = normalizedIds;
+        detectionResults.filter = '';
+        detectionResults.selected.clear();
+        detectionResults.selectionMode = false;
+        detectionResults.allowWhitelisted = options.allowWhitelisted === true;
+        detectionResults.returnPanel = activePanel === 'results' ? detectionResults.returnPanel : (options.returnPanel || activePanel);
+        detectionResults.title = String(options.title || (normalizedScope === 'backend' ? '后端插件检测结果' : '前端扩展检测结果'));
+        detectionResults.action = '';
+        detectionResults.message = '';
+        $popup.find('.em-tab').removeClass('active');
+        $popup.find('.em-panel').removeClass('active').filter('[data-panel="results"]').addClass('active');
+        renderDetectionResults($popup);
+        const content = $popup.find('.em-content')[0];
+        if (content) content.scrollTop = 0;
+    }
+
+    function closeDetectionResults($popup) {
+        const panel = detectionResults.returnPanel || (detectionResults.scope === 'backend' ? 'backend' : 'installed');
+        detectionResults.active = false;
+        detectionResults.selected.clear();
+        detectionResults.selectionMode = false;
+        detectionResults.filter = '';
+        detectionResults.action = '';
+        detectionResults.message = '';
+        $popup.find('.em-panel').removeClass('active').filter('[data-panel="' + panel + '"]').addClass('active');
+        $popup.find('.em-tab').removeClass('active');
+        const tab = ['installed', 'backend', 'install'].includes(panel) ? panel : (panel === 'whitelist' || panel === 'faq' ? 'install' : 'installed');
+        $popup.find('.em-tab[data-tab="' + tab + '"]').addClass('active');
+        if (panel === 'whitelist') renderWhitelistPanel($popup);
+        else if (panel === 'backend') renderBackendUpdate($popup);
+        else if (panel === 'installed') renderList($popup);
+        const content = $popup.find('.em-content')[0];
+        if (content) content.scrollTop = 0;
+    }
+
+    function renderDetectionResultBatch($popup, entities) {
+        const $toolbar = $popup.find('.em-results-batch-toolbar');
+        const selected = entities.filter(entity => detectionResults.selected.has(detectionResults.scope === 'backend' ? entity.id : folderOf(entity)));
+        const available = selected.filter(entity => detectionResultRank(entity) === 1 && (detectionResults.scope !== 'frontend' || folderOf(entity).toLowerCase() !== getInstalledExtensionName().toLowerCase()));
+        const busy = detectionResults.scope === 'backend' ? backendUpdateState.batchUpdating || ['checking', 'updating', 'loading'].includes(backendUpdateState.phase) : state.checking || state.batchUpdating || state.batchToggling;
+        const disabled = detectionResults.scope === 'frontend' ? selected.filter(entity => !entity.enabled) : [];
+        const enabled = detectionResults.scope === 'frontend' ? selected.filter(entity => entity.enabled) : [];
+        $popup.find('.em-results-multi-toggle').toggleClass('active', detectionResults.selectionMode).attr('aria-pressed', String(detectionResults.selectionMode)).find('span').text(detectionResults.selectionMode ? '退出多选' : '多选');
+        $toolbar.prop('hidden', !detectionResults.selectionMode);
+        if (!detectionResults.selectionMode) return;
+        $toolbar.attr('data-action', detectionResults.action || (detectionResults.scope === 'backend' && backendUpdateState.phase === 'checking' ? 'checking' : (detectionResults.scope === 'backend' && backendUpdateState.phase === 'updating' ? 'updating' : '')));
+        $toolbar.toggleClass('em-processing', busy);
+        $toolbar.html('<div class="em-batch-summary"><strong>本批多选</strong><span>' + (selected.length ? '已选 ' + selected.length + ' 个' + (available.length ? ' · 可更新 ' + available.length + ' 个' : '') : '请选择插件') + '</span></div><div class="em-batch-controls"><button type="button" class="em-action em-results-select-visible"><i class="fa-solid fa-list-check"></i> 全选当前</button><button type="button" class="em-action em-results-clear"' + (selected.length ? '' : ' disabled') + '><i class="fa-solid fa-xmark"></i> 清空</button>' + (detectionResults.scope === 'frontend' ? '<button type="button" class="em-action em-results-enable-selected"' + (disabled.length && !busy ? '' : ' disabled') + '><i class="fa-solid fa-toggle-on"></i> 启用选中</button><button type="button" class="em-action em-results-disable-selected"' + (enabled.length && !busy ? '' : ' disabled') + '><i class="fa-solid fa-toggle-off"></i> 禁用选中</button>' : '') + '<button type="button" class="em-action em-results-check-selected"' + (selected.length && !busy ? '' : ' disabled') + '><i class="fa-solid fa-magnifying-glass"></i> 检测选中</button><button type="button" class="em-action primary em-results-update-selected"' + (available.length && !busy ? '' : ' disabled') + '><i class="fa-solid fa-cloud-arrow-down"></i> 更新选中</button></div><div class="em-results-batch-status"></div>');
+        $toolbar.find('.em-results-batch-status').text(detectionResults.message);
+    }
+
+    function renderDetectionResults($popup) {
+        if (!detectionResults.active) return;
+        const all = detectionResultEntities();
+        const visible = filteredDetectionResults();
+        const validIds = new Set(all.map(entity => detectionResults.scope === 'backend' ? entity.id : folderOf(entity)));
+        Array.from(detectionResults.selected).forEach(id => { if (!validIds.has(id)) detectionResults.selected.delete(id); });
+        const counts = detectionResultCounts(all);
+        const busy = detectionResults.scope === 'backend' ? backendUpdateState.batchUpdating || ['checking', 'updating', 'loading'].includes(backendUpdateState.phase) : state.checking || state.batchUpdating || state.batchToggling;
+        syncSearchInput($popup.find('.em-results-search'), detectionResults.filter);
+        $popup.find('.em-results-search-clear').prop('hidden', !detectionResults.filter);
+        $popup.find('.em-results-title').text(detectionResults.title);
+        $popup.find('.em-results-summary').text('本批 ' + all.length + ' 个 · 检测失败 ' + counts.failed + ' 个 · 可更新 ' + counts.available + ' 个 · 最新 ' + counts.latest + ' 个');
+        $popup.find('.em-results-status').text(busy ? (detectionResults.message || (detectionResults.scope === 'backend' ? backendUpdateState.message : (state.batchUpdating ? '正在依次热更新前端扩展' : (state.batchToggling ? '正在处理本批前端扩展' : '正在检测本批前端扩展')))) : '失败项标红置顶，可更新项标绿排列其后');
+        $popup.find('.em-results-count').text(visible.length + ' / ' + all.length);
+        $popup.find('.em-results-recheck').prop('disabled', busy || !all.length).html((detectionResults.scope === 'backend' ? backendUpdateState.phase === 'checking' : state.checking) ? '<i class="fa-solid fa-spinner fa-spin"></i> 检测中' : '<i class="fa-solid fa-magnifying-glass"></i> 重新检测');
+        $popup.find('.em-results-update-all').prop('hidden', counts.available === 0).prop('disabled', busy).html((detectionResults.scope === 'backend' ? backendUpdateState.batchUpdating : state.batchUpdating) ? '<i class="fa-solid fa-spinner fa-spin"></i> 更新中' : '<i class="fa-solid fa-cloud-arrow-down"></i> 更新全部');
+        $popup.find('.em-results-list').html(visible.length ? visible.map(entity => detectionResults.scope === 'backend' ? renderBackendPluginCard(entity, { resultView: true }) : renderCard(entity, { resultView: true })).join('') : '<div class="em-empty"><i class="fa-solid fa-circle-check"></i><span>本次检测没有匹配的插件</span></div>');
+        renderDetectionResultBatch($popup, all);
+    }
+
+    async function checkDetectionResultIds(ids, $popup) {
+        const targets = Array.from(new Set(ids || [])).filter(id => detectionResults.ids.includes(id));
+        if (!targets.length) return;
+        if (detectionResults.scope === 'backend') {
+            await checkBackendPlugins(targets, $popup, { allowWhitelisted: detectionResults.allowWhitelisted, showResults: false });
+            backendUpdateState.statusSortActive = true;
+            renderDetectionResults($popup);
+            return;
+        }
+        if (state.checking || state.batchUpdating || state.batchToggling) return;
+        const extensions = targets.map(id => state.extensions.find(extension => folderOf(extension) === id)).filter(Boolean);
+        state.checking = true;
+        state.frontendCheckProgress = { completed: 0, total: extensions.length };
+        detectionResults.action = 'checking';
+        beginDetection($popup);
+        detectionResults.message = '正在检测 0 / ' + extensions.length;
+        renderDetectionResults($popup);
+        try {
+            await mapDetectionTargets(extensions, async extension => {
+                const result = await checkOne(extension, undefined, { allowWhitelisted: detectionResults.allowWhitelisted });
+                state.frontendCheckProgress.completed += 1;
+                detectionResults.message = '正在检测 ' + state.frontendCheckProgress.completed + ' / ' + extensions.length;
+                renderDetectionResults($popup);
+                return result;
+            });
+            state.statusSortActive = true;
+        } finally {
+            state.checking = false;
+            detectionResults.action = '';
+            detectionResults.message = '';
+            renderList($popup);
+            renderDetectionResults($popup);
+            finishDetection($popup);
+        }
+    }
+
+    async function updateDetectionResultIds(ids, $popup) {
+        const selected = new Set(ids || []);
+        if (detectionResults.scope === 'backend') {
+            await updateBackendPluginsSequentially(detectionResults.ids.filter(id => selected.has(id)), $popup, { allowWhitelisted: detectionResults.allowWhitelisted });
+            renderDetectionResults($popup);
+            return;
+        }
+        if (state.batchUpdating || state.batchToggling || state.checking) return;
+        const targets = detectionResultEntities().filter(extension => selected.has(folderOf(extension)) && state.updates.get(folderOf(extension))?.isUpToDate === false && folderOf(extension).toLowerCase() !== getInstalledExtensionName().toLowerCase());
+        if (!targets.length) { if (window.toastr) toastr.info('本次结果中没有可更新的前端扩展'); return; }
+        state.batchUpdating = true;
+        detectionResults.action = 'updating';
+        renderDetectionResults($popup);
+        let completed = 0;
+        try {
+            for (let index = 0; index < targets.length; index++) {
+                detectionResults.message = '正在更新 ' + (index + 1) + ' / ' + targets.length + '：' + targets[index].displayName;
+                renderDetectionResults($popup);
+                if (await updateOne(targets[index], $popup, { quiet: true, deferRender: true, deferSelectionRender: true, allowWhitelisted: detectionResults.allowWhitelisted })) completed += 1;
+                renderDetectionResults($popup);
+            }
+            if (window.toastr) toastr.success('本批更新完成：' + completed + ' / ' + targets.length + '，已依次热加载');
+        } finally {
+            state.batchUpdating = false;
+            detectionResults.action = '';
+            detectionResults.message = '';
+            renderList($popup);
+            renderDetectionResults($popup);
+        }
+    }
+
+    async function setDetectionResultEnabled(ids, enabled, $popup) {
+        if (detectionResults.scope !== 'frontend' || state.batchToggling || state.batchUpdating || state.checking) return;
+        const selected = new Set(ids || []);
+        const targets = detectionResultEntities().filter(extension => selected.has(folderOf(extension)) && extension.enabled !== enabled);
+        if (!targets.length) return;
+        state.batchToggling = true;
+        detectionResults.action = enabled ? 'enabling' : 'disabling';
+        renderDetectionResults($popup);
+        let completed = 0;
+        try {
+            for (let index = 0; index < targets.length; index++) {
+                const extension = targets[index];
+                detectionResults.message = '正在' + (enabled ? '启用 ' : '禁用 ') + (index + 1) + ' / ' + targets.length + '：' + extension.displayName;
+                state.togglingExtensions.add(folderOf(extension));
+                renderDetectionResults($popup);
+                try {
+                    await setExtensionEnabled(extension, enabled, false);
+                    extension.enabled = enabled;
+                    if (enabled) await hotReload(extension);
+                    completed += 1;
+                } catch (error) { if (window.toastr) toastr.error(extension.displayName + ' 处理失败：' + (error.message || error)); }
+                finally { state.togglingExtensions.delete(folderOf(extension)); }
+            }
+            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length);
+        } finally {
+            state.batchToggling = false;
+            detectionResults.action = '';
+            detectionResults.message = '';
+            renderList($popup);
+            renderDetectionResults($popup);
+        }
     }
 
     async function copyText(value) {
@@ -1850,20 +2106,20 @@
     }
 
     function whitelistStatusRank(entry, scope) {
-        if (!entry.entity) return 5;
+        if (!entry.entity) return 4;
         if (scope === 'backend') {
-            if (backendUpdateState.checkingPlugins.has(entry.id) || entry.entity.updating) return 0;
+            if (backendUpdateState.checkingPlugins.has(entry.id) || entry.entity.updating) return -1;
+            if (entry.entity.error) return 0;
             if (backendUpdateState.checkedPlugins.has(entry.id) && entry.entity.isUpToDate === false) return 1;
-            if (entry.entity.error) return 2;
-            if (backendUpdateState.checkedPlugins.has(entry.id)) return 3;
-            return 4;
+            if (backendUpdateState.checkedPlugins.has(entry.id)) return 2;
+            return 3;
         }
         const update = state.updates.get(entry.id);
-        if (state.checkingExtensions.has(entry.id) || state.updating.has(entry.id)) return 0;
+        if (state.checkingExtensions.has(entry.id) || state.updating.has(entry.id)) return -1;
+        if (update?.error) return 0;
         if (update?.isUpToDate === false) return 1;
-        if (update?.error) return 2;
-        if (state.updates.has(entry.id)) return 3;
-        return 4;
+        if (state.updates.has(entry.id)) return 2;
+        return 3;
     }
 
     function filteredWhitelistEntries() {
@@ -1874,6 +2130,7 @@
             const matchesText = !filter || [entry.name, entry.id, entry.detail, entry.group].join(' ').toLowerCase().includes(filter);
             return matchesCategory && matchesText;
         }).sort((a, b) => {
+            if (whitelistState.statusSortActive) return whitelistStatusRank(a, scope) - whitelistStatusRank(b, scope) || a.name.localeCompare(b.name, 'zh-Hans');
             if (whitelistState.sort === 'status') return whitelistStatusRank(a, scope) - whitelistStatusRank(b, scope) || a.name.localeCompare(b.name, 'zh-Hans');
             return a.name.localeCompare(b.name, 'zh-Hans');
         });
@@ -1979,7 +2236,7 @@
             if (window.toastr) toastr.info('当前白名单没有检测失败的插件');
             return;
         }
-        await checkWhitelistPlugins(ids, $popup);
+        await checkWhitelistPlugins(ids, $popup, { showResults: true, resultTitle: '白名单检测失败项重试结果' });
         const failed = failedWhitelistEntries().length;
         if (window.toastr) toastr.info(failed ? `重试完成，仍有 ${failed} 个白名单插件检测失败` : '白名单检测失败项已全部重试成功');
     }
@@ -2047,7 +2304,7 @@
         $popup.find('.em-whitelist-legacy').prop('hidden', state.backend.supportsWhitelist);
     }
 
-    async function checkWhitelistPlugins(ids, $popup) {
+    async function checkWhitelistPlugins(ids, $popup, options = {}) {
         const scope = whitelistState.scope;
         const targets = whitelistInstalled(scope).filter(item => ids.includes(scope === "backend" ? item.id : folderOf(item)));
         if (!targets.length) {
@@ -2055,7 +2312,7 @@
             return;
         }
         if (scope === "backend") {
-            await checkBackendPlugins(targets.map(plugin => plugin.id), $popup, { allowWhitelisted: true, whitelistView: true });
+            await checkBackendPlugins(targets.map(plugin => plugin.id), $popup, { allowWhitelisted: true, whitelistView: true, showResults: options.showResults === true, returnPanel: 'whitelist', resultTitle: options.resultTitle || '白名单后端插件检测结果' });
             renderWhitelistPanel($popup);
             return;
         }
@@ -2076,7 +2333,11 @@
             if (!state.detectionCancelled) state.frontendCheckProgress = { completed: state.frontendCheckProgress.total, total: state.frontendCheckProgress.total };
             renderWhitelistPanel($popup);
             renderList($popup);
+            const showResults = options.showResults === true && !state.detectionCancelled;
+            state.statusSortActive = options.showResults === true || state.statusSortActive;
+            whitelistState.statusSortActive = options.showResults === true || whitelistState.statusSortActive;
             finishDetection($popup);
+            if (showResults) openDetectionResults('frontend', targets.map(folderOf), $popup, { allowWhitelisted: true, returnPanel: 'whitelist', title: options.resultTitle || '白名单前端扩展检测结果' });
         }
     }
 
@@ -2667,13 +2928,17 @@
             #st-extension-manager-overlay [data-action="checking"] .em-check-selected i,
             #st-extension-manager-overlay [data-action="checking"] .em-check-selected-backend i,
             #st-extension-manager-overlay [data-action="checking"] .em-whitelist-check-selected i,
+            #st-extension-manager-overlay [data-action="checking"] .em-results-check-selected i,
             #st-extension-manager-overlay [data-action="updating"] .em-update-selected i,
             #st-extension-manager-overlay [data-action="updating"] .em-update-selected-backend i,
             #st-extension-manager-overlay [data-action="updating"] .em-whitelist-update-selected i,
+            #st-extension-manager-overlay [data-action="updating"] .em-results-update-selected i,
             #st-extension-manager-overlay [data-action="enabling"] .em-enable-selected i,
             #st-extension-manager-overlay [data-action="enabling"] .em-whitelist-enable-selected i,
+            #st-extension-manager-overlay [data-action="enabling"] .em-results-enable-selected i,
             #st-extension-manager-overlay [data-action="disabling"] .em-disable-selected i,
             #st-extension-manager-overlay [data-action="disabling"] .em-whitelist-disable-selected i,
+            #st-extension-manager-overlay [data-action="disabling"] .em-results-disable-selected i,
             #st-extension-manager-overlay .em-save-meta:disabled i,
             #st-extension-manager-overlay .em-backend-card .em-action.primary:disabled i { animation: em-spin .8s linear infinite; }
 
@@ -2706,6 +2971,12 @@
                 border-color: color-mix(in srgb, var(--em-accent) 50%, transparent);
                 background: var(--em-surface-strong);
                 box-shadow: 0 5px 18px rgba(15, 25, 36, .07);
+            }
+            #st-extension-manager-overlay .em-card.is-error {
+                border-color: rgba(185, 78, 85, .55);
+                border-left: 4px solid #b94e55;
+                background: color-mix(in srgb, #b94e55 9%, var(--em-surface));
+                box-shadow: 0 4px 16px rgba(130, 37, 45, .1);
             }
             #st-extension-manager-overlay .em-card.is-update {
                 border-color: rgba(39, 141, 80, .52);
@@ -2931,6 +3202,12 @@
             #st-extension-manager-overlay .em-error-details[hidden] { display: none; }
             #st-extension-manager-overlay .em-error-details pre { max-height: 180px; margin: 0; padding: 9px; border-radius: 5px; background: var(--em-control); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: inherit; font: .72em/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
             #st-extension-manager-overlay .em-error-details .em-copy-error { align-self: flex-start; }
+            #st-extension-manager-overlay .em-results-page { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+            #st-extension-manager-overlay .em-results-tools { margin-bottom: 0; }
+            #st-extension-manager-overlay .em-results-list-head { margin-top: 0; }
+            #st-extension-manager-overlay .em-results-list { display: flex; flex-direction: column; gap: 8px; }
+            #st-extension-manager-overlay .em-results-summary { overflow-wrap: anywhere; }
+            #st-extension-manager-overlay .em-results-multi-toggle.active { border-color: var(--em-accent); background: color-mix(in srgb, var(--em-accent) 12%, var(--em-control)); color: var(--em-accent); }
             #st-extension-manager-overlay .em-faq-page { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
             #st-extension-manager-overlay .em-faq-list { display: flex; flex-direction: column; gap: 8px; }
             #st-extension-manager-overlay .em-faq-item { border: 1px solid var(--em-line-soft); border-radius: 7px; background: var(--em-surface); overflow: hidden; }
@@ -3248,7 +3525,7 @@
         if ($(`#${OVERLAY_ID}`).length) return;
         const dark = readStoredNightMode();
         $(`#${FLOAT_ID}`).remove();
-        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button><button type="button" class="em-action em-cancel-detection" hidden><i class="fa-solid fa-ban"></i><span>取消检测</span></button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span class="em-frontend-update-status">检测后显示可用更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button><button type="button" class="em-action em-retry-frontend" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-update-all" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" type="search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><button type="button" class="em-action em-search-clear em-frontend-search-clear" aria-label="取消前端搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-frontend-tools em-backend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件管理</strong><span class="em-backend-panel-state">正在检测管理后端连接</span></div><button type="button" class="em-action em-backend-refresh" title="重新读取" aria-label="重新读取后端插件"><i class="fa-solid fa-arrows-rotate"></i> 读取插件</button></div><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件更新</strong><span class="em-backend-update-status">读取后端插件后可检测更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-magnifying-glass"></i> 检测全部</button><button type="button" class="em-action em-retry-backend" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-backend-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-backend-search" type="search" placeholder="搜索后端插件、分组或备注" aria-label="搜索后端插件"></div><button type="button" class="em-action em-search-clear em-backend-search-clear" aria-label="取消后端搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-backend-category-filter" aria-label="按后端分组筛选"><option value="">全部分组</option></select><select class="em-select em-backend-sort" aria-label="后端插件排序方式"><option value="name">按名称</option><option value="status">按更新状态</option></select><span class="em-count em-backend-count"></span><button type="button" class="em-action em-backend-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-backend-batch-toolbar" hidden></div><div class="em-list em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待读取</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端，请在“安装扩展”页选择 Termux 或 Windows 并复制对应的一键命令。</p><p>命令会启用 <code>enableServerPlugins: true</code>，但不会自动重启 SillyTavern。</p></div><p class="em-backend-update-note">后端检测只查询固定插件目录中的 Git 仓库；更新按检测结果依次执行 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><div class="em-platform-switch" role="group" aria-label="选择运行环境"><button type="button" class="em-platform-option active" data-platform="termux" aria-pressed="true"><i class="fa-solid fa-mobile-screen"></i><span>Termux</span></button><button type="button" class="em-platform-option" data-platform="windows" aria-pressed="false"><i class="fa-solid fa-desktop"></i><span>Windows</span></button></div><pre class="em-backend-command">${escapeHtml(backendInstallCommand())}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制 Termux 一键命令</button><p class="em-install-status em-backend-install-note">请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div><div class="em-install em-settings"><h3><i class="fa-solid fa-gear"></i> 设置</h3><div class="em-network-settings"><label class="em-setting-toggle"><input class="em-privacy-masking" type="checkbox"><span class="em-switch-track" aria-hidden="true"><span></span></span><span class="em-setting-copy"><strong>隐私打码</strong><small>模糊插件 ID、GitHub 用户名和提交号，截图时避免泄露来源信息</small></span></label><label class="em-setting-toggle"><input class="em-network-optimization" type="checkbox"><span class="em-switch-track" aria-hidden="true"><span></span></span><span class="em-setting-copy"><strong>弱网检测优化</strong><small>限制前端检测并发，并对临时网络错误自动退避重试</small></span></label><label class="em-proxy-setting"><span>Git 代理（可选）</span><input class="em-git-proxy" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:7890"></label><div class="em-network-setting-actions"><button type="button" class="em-action primary em-save-network-settings"><i class="fa-solid fa-floppy-disk"></i> 保存设置</button><span class="em-network-setting-status">正在读取设置</span></div><p class="em-network-setting-note">代理仅临时用于后端插件 Git 检测，不修改全局 Git 配置或仓库地址；前端扩展使用限并发和自动重试。</p></div><button type="button" class="em-action em-open-faq"><i class="fa-solid fa-circle-question"></i> 常见问题</button><div class="em-install-backend-head"><strong>更新检测白名单</strong><span class="em-whitelist-setting-status">正在读取</span></div><button type="button" class="em-action em-open-whitelist"><i class="fa-solid fa-shield-halved"></i> 白名单管理</button></div></div></section><section class="em-panel" data-panel="faq"><div class="em-faq-page"><div class="em-whitelist-head"><button type="button" class="em-icon em-faq-back" title="返回安装扩展" aria-label="返回安装扩展"><i class="fa-solid fa-arrow-left"></i></button><div><strong>常见问题</strong><span>点击问题查看解决方案</span></div></div><div class="em-faq-list">${renderFaqItems()}</div></div></section><section class="em-panel" data-panel="whitelist"><div class="em-whitelist-page"><div class="em-whitelist-head"><button type="button" class="em-icon em-whitelist-back" title="返回安装扩展" aria-label="返回安装扩展"><i class="fa-solid fa-arrow-left"></i></button><div><strong>白名单管理</strong><span>主列表自动检测会跳过这些插件，可在此页手动检测和更新</span></div></div><div class="em-platform-switch em-whitelist-switch" role="group" aria-label="选择白名单类型"><button type="button" class="em-platform-option em-whitelist-scope active" data-scope="frontend" aria-pressed="true"><i class="fa-solid fa-puzzle-piece"></i><span>前端扩展</span></button><button type="button" class="em-platform-option em-whitelist-scope" data-scope="backend" aria-pressed="false"><i class="fa-solid fa-server"></i><span>后端插件</span></button></div><div class="em-frontend-tools em-whitelist-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>白名单插件更新</strong><span class="em-whitelist-update-status">等待检测白名单插件</span></div><div class="em-tool-actions"><button type="button" class="em-action em-whitelist-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测全部</button><button type="button" class="em-action em-whitelist-retry" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-whitelist-update-all" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-whitelist-list-head"><div class="em-search-field em-whitelist-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-whitelist-search" type="search" placeholder="搜索白名单插件、分组或备注" aria-label="搜索白名单插件"></div><button type="button" class="em-action em-search-clear em-whitelist-search-clear" aria-label="取消白名单搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-category-filter em-whitelist-category" aria-label="按白名单分组筛选"><option value="">全部分组</option></select><select class="em-select em-whitelist-sort" aria-label="白名单排序方式"><option value="name">按名称</option><option value="status">按更新状态</option></select><span class="em-count em-whitelist-count"></span><button type="button" class="em-action em-whitelist-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-whitelist-batch-toolbar" hidden></div><div class="em-list em-whitelist-list"></div><p class="em-install-status em-whitelist-legacy" hidden>当前管理后端不支持白名单，请更新后端并手动重启 SillyTavern。</p></div></section></main></div></div>`);
+        const $popup = $(`<div id="${OVERLAY_ID}" class="em-overlay" role="dialog" aria-modal="true" aria-label="扩展管理器" tabindex="-1"><div class="em-box ${dark ? 'em-dark' : ''}"><header class="em-header"><div><div class="em-title"><i class="fa-solid fa-wand-magic-sparkles"></i>${SCRIPT_NAME}<span class="em-version">v${SCRIPT_VERSION}</span></div><div class="em-subtitle"><span class="em-backend-state">服务端存储检测中</span></div></div><div class="em-head-actions"><button type="button" class="em-icon em-minimize" title="收起面板" aria-label="收起面板" aria-expanded="true"><i class="fa-solid fa-window-minimize"></i></button><button type="button" class="em-icon em-night" title="切换夜间模式" aria-label="切换夜间模式"><i class="fa-solid ${dark ? 'fa-sun' : 'fa-moon'}"></i></button><button type="button" class="em-icon em-close" title="关闭" aria-label="关闭面板"><i class="fa-solid fa-xmark"></i></button></div></header><nav class="em-toolbar" aria-label="扩展管理器页面"><button type="button" class="em-tab active" data-tab="installed"><i class="fa-solid fa-layer-group"></i> 前端扩展</button><button type="button" class="em-tab" data-tab="backend"><i class="fa-solid fa-server"></i> 后端管理</button><button type="button" class="em-tab" data-tab="install"><i class="fa-solid fa-download"></i> 安装扩展</button><button type="button" class="em-action em-cancel-detection" hidden><i class="fa-solid fa-ban"></i><span>取消检测</span></button></nav><main class="em-content"><section class="em-panel active" data-panel="installed"><div class="em-frontend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>扩展管理器本体</strong><span class="em-self-update-status">点击按钮检查本体更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-self"><i class="fa-solid fa-arrows-rotate"></i> 检测</button><button type="button" class="em-action primary em-update-self" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新</button></div></div><div class="em-tool-row"><div class="em-tool-copy"><strong>前端扩展更新</strong><span class="em-frontend-update-status">检测后显示可用更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测更新</button><button type="button" class="em-action em-retry-frontend" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-update-all" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div><label class="em-float-size-control"><span>悬浮球大小</span><input class="em-float-size" type="range" min="25" max="56" step="1" value="34"><output class="em-float-size-value">34px</output></label></div><div class="em-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-search" type="search" placeholder="搜索扩展、仓库、分组或备注" aria-label="搜索扩展"></div><button type="button" class="em-action em-search-clear em-frontend-search-clear" aria-label="取消前端搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-category-filter" aria-label="按分组筛选"><option value="">全部分组</option></select><select class="em-select em-sort" aria-label="扩展排序方式"><option value="name">按名称</option><option value="type">按类型</option></select><span id="em-count" class="em-count"></span><button type="button" class="em-action em-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button><button type="button" class="em-action em-refresh" title="重新读取" aria-label="重新读取扩展"><i class="fa-solid fa-arrows-rotate"></i></button></div><div class="em-batch-toolbar" hidden></div><div id="em-list" class="em-list"></div></section><section class="em-panel" data-panel="backend"><div class="em-frontend-tools em-backend-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件管理</strong><span class="em-backend-panel-state">正在检测管理后端连接</span></div><button type="button" class="em-action em-backend-refresh" title="重新读取" aria-label="重新读取后端插件"><i class="fa-solid fa-arrows-rotate"></i> 读取插件</button></div><div class="em-tool-row"><div class="em-tool-copy"><strong>后端插件更新</strong><span class="em-backend-update-status">读取后端插件后可检测更新</span></div><div class="em-tool-actions"><button type="button" class="em-action em-check-backend"><i class="fa-solid fa-magnifying-glass"></i> 检测全部</button><button type="button" class="em-action em-retry-backend" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-update-backend" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-backend-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-backend-search" type="search" placeholder="搜索后端插件、分组或备注" aria-label="搜索后端插件"></div><button type="button" class="em-action em-search-clear em-backend-search-clear" aria-label="取消后端搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-backend-category-filter" aria-label="按后端分组筛选"><option value="">全部分组</option></select><select class="em-select em-backend-sort" aria-label="后端插件排序方式"><option value="name">按名称</option><option value="status">按更新状态</option></select><span class="em-count em-backend-count"></span><button type="button" class="em-action em-backend-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-backend-batch-toolbar" hidden></div><div class="em-list em-backend-plugin-list"><div class="em-backend-plugin-empty"><i class="fa-solid fa-server"></i><span>等待读取</span></div></div><div class="em-backend-install-help" hidden><p>未检测到扩展管理器后端，请在“安装扩展”页选择 Termux 或 Windows 并复制对应的一键命令。</p><p>命令会启用 <code>enableServerPlugins: true</code>，但不会自动重启 SillyTavern。</p></div><p class="em-backend-update-note">后端检测只查询固定插件目录中的 Git 仓库；更新按检测结果依次执行 <code>git pull --ff-only</code>，不会自动重启，完成后请手动重启。</p></section><section class="em-panel" data-panel="install"><div class="em-install-page"><div class="em-install"><h3><i class="fa-solid fa-puzzle-piece"></i> 安装前端扩展</h3><label>Git 仓库地址<input class="em-install-url" type="url" inputmode="url" placeholder="https://github.com/user/repository"></label><div class="em-install-row"><label>分支或标签（可选）<input class="em-install-branch" type="text" placeholder="main"></label><label>安装范围<select class="em-install-scope"><option value="user">当前用户</option><option value="global">全部用户</option></select></label></div><button type="button" class="em-action primary em-install-frontend"><i class="fa-solid fa-download"></i> 安装并加载</button><p class="em-install-status em-frontend-install-status">等待输入仓库地址</p></div><div class="em-install"><h3><i class="fa-solid fa-server"></i> 安装后端扩展</h3><div class="em-install-backend-head"><strong>扩展管理器后端</strong><span class="em-manager-backend-status">正在检测连接</span></div><div class="em-platform-switch" role="group" aria-label="选择运行环境"><button type="button" class="em-platform-option active" data-platform="termux" aria-pressed="true"><i class="fa-solid fa-mobile-screen"></i><span>Termux</span></button><button type="button" class="em-platform-option" data-platform="windows" aria-pressed="false"><i class="fa-solid fa-desktop"></i><span>Windows</span></button></div><pre class="em-backend-command">${escapeHtml(backendInstallCommand())}</pre><button type="button" class="em-action primary em-copy-backend-command"><i class="fa-solid fa-terminal"></i> 复制 Termux 一键命令</button><p class="em-install-status em-backend-install-note">请在 Termux 中粘贴执行。命令不会自动重启，完成后请手动重启 SillyTavern。</p><div class="em-install-placeholder">其他后端插件安装暂未开放</div></div><div class="em-install em-settings"><h3><i class="fa-solid fa-gear"></i> 设置</h3><div class="em-network-settings"><label class="em-setting-toggle"><input class="em-privacy-masking" type="checkbox"><span class="em-switch-track" aria-hidden="true"><span></span></span><span class="em-setting-copy"><strong>隐私打码</strong><small>模糊插件 ID、GitHub 用户名和提交号，截图时避免泄露来源信息</small></span></label><label class="em-setting-toggle"><input class="em-network-optimization" type="checkbox"><span class="em-switch-track" aria-hidden="true"><span></span></span><span class="em-setting-copy"><strong>弱网检测优化</strong><small>限制前端检测并发，并对临时网络错误自动退避重试</small></span></label><label class="em-proxy-setting"><span>Git 代理（可选）</span><input class="em-git-proxy" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:7890"></label><div class="em-network-setting-actions"><button type="button" class="em-action primary em-save-network-settings"><i class="fa-solid fa-floppy-disk"></i> 保存设置</button><span class="em-network-setting-status">正在读取设置</span></div><p class="em-network-setting-note">代理仅临时用于后端插件 Git 检测，不修改全局 Git 配置或仓库地址；前端扩展使用限并发和自动重试。</p></div><button type="button" class="em-action em-open-faq"><i class="fa-solid fa-circle-question"></i> 常见问题</button><div class="em-install-backend-head"><strong>更新检测白名单</strong><span class="em-whitelist-setting-status">正在读取</span></div><button type="button" class="em-action em-open-whitelist"><i class="fa-solid fa-shield-halved"></i> 白名单管理</button></div></div></section><section class="em-panel" data-panel="results"><div class="em-results-page"><div class="em-whitelist-head"><button type="button" class="em-icon em-results-back" title="返回管理页面" aria-label="返回管理页面"><i class="fa-solid fa-arrow-left"></i></button><div><strong class="em-results-title">检测结果</strong><span class="em-results-summary">正在整理本次检测结果</span></div></div><div class="em-frontend-tools em-results-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>本次检测</strong><span class="em-results-status">失败项优先，其次为可更新项</span></div><div class="em-tool-actions"><button type="button" class="em-action em-results-recheck"><i class="fa-solid fa-magnifying-glass"></i> 重新检测</button><button type="button" class="em-action primary em-results-update-all" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-results-list-head"><div class="em-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-results-search" type="search" placeholder="搜索本次检测的插件" aria-label="搜索检测结果"></div><button type="button" class="em-action em-search-clear em-results-search-clear" aria-label="取消结果搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><span class="em-count em-results-count"></span><button type="button" class="em-action em-results-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-results-batch-toolbar" hidden></div><div class="em-list em-results-list"></div></div></section><section class="em-panel" data-panel="faq"><div class="em-faq-page"><div class="em-whitelist-head"><button type="button" class="em-icon em-faq-back" title="返回安装扩展" aria-label="返回安装扩展"><i class="fa-solid fa-arrow-left"></i></button><div><strong>常见问题</strong><span>点击问题查看解决方案</span></div></div><div class="em-faq-list">${renderFaqItems()}</div></div></section><section class="em-panel" data-panel="whitelist"><div class="em-whitelist-page"><div class="em-whitelist-head"><button type="button" class="em-icon em-whitelist-back" title="返回安装扩展" aria-label="返回安装扩展"><i class="fa-solid fa-arrow-left"></i></button><div><strong>白名单管理</strong><span>主列表自动检测会跳过这些插件，可在此页手动检测和更新</span></div></div><div class="em-platform-switch em-whitelist-switch" role="group" aria-label="选择白名单类型"><button type="button" class="em-platform-option em-whitelist-scope active" data-scope="frontend" aria-pressed="true"><i class="fa-solid fa-puzzle-piece"></i><span>前端扩展</span></button><button type="button" class="em-platform-option em-whitelist-scope" data-scope="backend" aria-pressed="false"><i class="fa-solid fa-server"></i><span>后端插件</span></button></div><div class="em-frontend-tools em-whitelist-tools"><div class="em-tool-row"><div class="em-tool-copy"><strong>白名单插件更新</strong><span class="em-whitelist-update-status">等待检测白名单插件</span></div><div class="em-tool-actions"><button type="button" class="em-action em-whitelist-check-all"><i class="fa-solid fa-magnifying-glass"></i> 检测全部</button><button type="button" class="em-action em-whitelist-retry" hidden><i class="fa-solid fa-rotate-right"></i> 重试失败</button><button type="button" class="em-action primary em-whitelist-update-all" hidden><i class="fa-solid fa-cloud-arrow-down"></i> 更新全部</button></div></div></div><div class="em-list-head em-whitelist-list-head"><div class="em-search-field em-whitelist-search-field"><i class="fa-solid fa-magnifying-glass"></i><input class="em-whitelist-search" type="search" placeholder="搜索白名单插件、分组或备注" aria-label="搜索白名单插件"></div><button type="button" class="em-action em-search-clear em-whitelist-search-clear" aria-label="取消白名单搜索" hidden><i class="fa-solid fa-xmark"></i><span>取消搜索</span></button><select class="em-category-filter em-whitelist-category" aria-label="按白名单分组筛选"><option value="">全部分组</option></select><select class="em-select em-whitelist-sort" aria-label="白名单排序方式"><option value="name">按名称</option><option value="status">按更新状态</option></select><span class="em-count em-whitelist-count"></span><button type="button" class="em-action em-whitelist-multi-toggle" aria-pressed="false"><i class="fa-solid fa-square-check"></i><span>多选</span></button></div><div class="em-batch-toolbar em-whitelist-batch-toolbar" hidden></div><div class="em-list em-whitelist-list"></div><p class="em-install-status em-whitelist-legacy" hidden>当前管理后端不支持白名单，请更新后端并手动重启 SillyTavern。</p></div></section></main></div></div>`);
         const $float = $(`<button type="button" id="${FLOAT_ID}" class="em-float" title="点击展开扩展管理器，拖动调整位置" aria-label="点击展开扩展管理器，拖动调整位置" hidden><i class="em-float-state fa-solid fa-wand-magic-sparkles"></i></button>`);
         $('body').append($popup, $float);
         applyFloatingBallSize($popup);
@@ -3337,6 +3614,30 @@
                 if (window.toastr) toastr.error('复制失败：' + (error.message || error));
             }
         });
+        $popup.on('click', '.em-results-back', function () { closeDetectionResults($popup); });
+        $popup.on('input', '.em-results-search', function () { detectionResults.filter = String($(this).val() || ''); renderDetectionResults($popup); });
+        $popup.on('click', '.em-results-search-clear', function () { const $input = $popup.find('.em-results-search').val(''); detectionResults.filter = ''; renderDetectionResults($popup); $input.trigger('focus'); });
+        $popup.on('click', '.em-results-multi-toggle', function () { detectionResults.selectionMode = !detectionResults.selectionMode; if (!detectionResults.selectionMode) detectionResults.selected.clear(); renderDetectionResults($popup); });
+        $popup.on('change', '.em-result-card-choice', function () { const id = String($(this).attr('data-result-id') || ''); if (this.checked) detectionResults.selected.add(id); else detectionResults.selected.delete(id); renderDetectionResults($popup); });
+        $popup.on('click', '.em-results-select-visible', function () { filteredDetectionResults().forEach(entity => detectionResults.selected.add(detectionResults.scope === 'backend' ? entity.id : folderOf(entity))); renderDetectionResults($popup); });
+        $popup.on('click', '.em-results-clear', function () { detectionResults.selected.clear(); renderDetectionResults($popup); });
+        $popup.on('click', '.em-results-recheck', function () { void checkDetectionResultIds(detectionResults.ids, $popup); });
+        $popup.on('click', '.em-results-check-selected', function () { void checkDetectionResultIds(Array.from(detectionResults.selected), $popup); });
+        $popup.on('click', '.em-results-update-all', function () { void updateDetectionResultIds(detectionResults.ids, $popup); });
+        $popup.on('click', '.em-results-update-selected', function () { void updateDetectionResultIds(Array.from(detectionResults.selected), $popup); });
+        $popup.on('click', '.em-results-enable-selected', function () { void setDetectionResultEnabled(Array.from(detectionResults.selected), true, $popup); });
+        $popup.on('click', '.em-results-disable-selected', function () { void setDetectionResultEnabled(Array.from(detectionResults.selected), false, $popup); });
+        $popup.on('click', '.em-result-check-one', function () { void checkDetectionResultIds([String($(this).attr('data-result-id') || '')], $popup); });
+        $popup.on('click', '.em-result-update-one', async function () {
+            const id = String($(this).attr('data-result-id') || '');
+            if (detectionResults.scope === 'backend') await updateBackendPlugin(id, $popup, { allowWhitelisted: detectionResults.allowWhitelisted });
+            else {
+                const extension = state.extensions.find(item => folderOf(item) === id);
+                if (extension) await updateOne(extension, $popup, { allowWhitelisted: detectionResults.allowWhitelisted });
+            }
+            renderDetectionResults($popup);
+        });
+        $popup.on('click', '.em-result-toggle-one', function () { void setDetectionResultEnabled([String($(this).attr('data-result-id') || '')], String($(this).attr('data-enable')) === 'true', $popup); });
         $popup.on('click', '.em-open-faq', function () {
             $popup.find('.em-tab').removeClass('active');
             $popup.find('.em-panel').removeClass('active');
@@ -3354,10 +3655,10 @@
             $answer.prop('hidden', !expanded);
             $(this).attr('aria-expanded', expanded ? 'true' : 'false').find('.em-faq-chevron').toggleClass('fa-chevron-right', !expanded).toggleClass('fa-chevron-down', expanded);
         });
-        $popup.on('click', '.em-tab', function () { const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void loadBackendPlugins($popup); });
+        $popup.on('click', '.em-tab', function () { detectionResults.active = false; detectionResults.selected.clear(); detectionResults.selectionMode = false; const tab = $(this).data('tab'); $popup.find('.em-tab').removeClass('active'); $(this).addClass('active'); $popup.find('.em-panel').removeClass('active'); $popup.find(`[data-panel="${tab}"]`).addClass('active'); if (tab === 'backend') void loadBackendPlugins($popup); });
         $popup.on('input', '.em-search', function () { state.filter = String($(this).val() || ''); renderList($popup); });
         $popup.on('click', '.em-frontend-search-clear', function () { const $input = $popup.find('.em-search').val(''); state.filter = ''; renderList($popup); $input.trigger('focus'); });
-        $popup.on('change', '.em-sort', function () { state.sort = $(this).val(); renderList($popup); });
+        $popup.on('change', '.em-sort', function () { state.sort = $(this).val(); state.statusSortActive = false; renderList($popup); });
         $popup.on('change', '.em-category-filter:not(.em-backend-category-filter)', function () { state.category = $(this).val(); renderList($popup); });
         $popup.on('input', '.em-float-size', function () { state.settings = normalizeSettings({ ...state.settings, floatingBallSize: $(this).val() }); applyFloatingBallSize($popup); });
         $popup.on('change', '.em-float-size', async function () {
@@ -3438,6 +3739,7 @@
         $popup.on('change', '.em-backend-sort', function () {
             backendUpdateState.sort = String($(this).val() || 'name');
             renderBackendPluginList($popup);
+            backendUpdateState.statusSortActive = false;
         });
         $popup.on('click', '.em-backend-refresh', () => loadBackendPlugins($popup, { force: true }));
         $popup.on('click', '.em-backend-multi-toggle', function () {
@@ -3686,6 +3988,7 @@
         });
         $popup.on('change', '.em-whitelist-sort', function () {
             whitelistState.sort = String($(this).val() || 'name');
+            whitelistState.statusSortActive = false;
             renderWhitelistPanel($popup);
         });
         $popup.on('click', '.em-whitelist-multi-toggle', function () {
@@ -3708,7 +4011,7 @@
             renderWhitelistPanel($popup);
         });
         $popup.on('click', '.em-whitelist-check-all', function () {
-            void checkWhitelistPlugins(whitelistEntries().filter(entry => entry.entity).map(entry => entry.id), $popup);
+            void checkWhitelistPlugins(whitelistEntries().filter(entry => entry.entity).map(entry => entry.id), $popup, { showResults: true, resultTitle: '白名单' + (whitelistState.scope === 'backend' ? '后端插件' : '前端扩展') + '检测结果' });
         });
         $popup.on('click', '.em-whitelist-retry', function () {
             void retryFailedWhitelist($popup);
@@ -3716,7 +4019,7 @@
         $popup.on('click', '.em-whitelist-update-all', function () {
             void updateWhitelistPlugins(whitelistEntries().filter(entry => entry.entity).map(entry => entry.id), $popup);
         });
-        $popup.on("click", ".em-whitelist-check-selected", function () { void withBatchAction(whitelistState, "checking", () => renderWhitelistPanel($popup), () => checkWhitelistPlugins(Array.from(whitelistState.selected), $popup)); });
+        $popup.on("click", ".em-whitelist-check-selected", function () { void withBatchAction(whitelistState, "checking", () => renderWhitelistPanel($popup), () => checkWhitelistPlugins(Array.from(whitelistState.selected), $popup, { showResults: true, resultTitle: '所选白名单' + (whitelistState.scope === 'backend' ? '后端插件' : '前端扩展') + '检测结果' })); });
         $popup.on("click", ".em-whitelist-update-selected", function () { void withBatchAction(whitelistState, "updating", () => renderWhitelistPanel($popup), () => updateWhitelistPlugins(Array.from(whitelistState.selected), $popup)); });
         $popup.on('click', '.em-whitelist-check-frontend', function () {
             void checkWhitelistPlugins([String($(this).attr('data-folder') || '')], $popup);
