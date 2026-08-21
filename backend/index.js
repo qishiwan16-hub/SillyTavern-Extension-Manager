@@ -81,7 +81,7 @@ function normalizeSettings(value) {
     const floatingBallSize = Number.isFinite(parsed)
         ? Math.min(FLOATING_BALL_MAX, Math.max(FLOATING_BALL_MIN, parsed))
         : FLOATING_BALL_DEFAULT;
-    return { floatingBallSize, networkOptimization: source.networkOptimization !== false, gitProxy: normalizeGitProxy(source.gitProxy) };
+    return { floatingBallSize, networkOptimization: source.networkOptimization !== false, enabledFirst: source.enabledFirst === true, gitProxy: normalizeGitProxy(source.gitProxy) };
 }
 
 function normalizeMetadataMap(value) {
@@ -243,6 +243,8 @@ async function getGitInfoFor(directory, fetchRemote = true, settings = {}) {
     }
     const branch = (await runGitIn(directory, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout;
     const localCommit = (await runGitIn(directory, ['rev-parse', 'HEAD'])).stdout;
+    let currentCommitAt = '';
+    try { currentCommitAt = (await runGitIn(directory, ['show', '-s', '--format=%cI', 'HEAD'])).stdout; } catch (error) {}
     if (fetchRemote) {
         try {
             await fetchGitRemote(directory, settings);
@@ -264,6 +266,7 @@ async function getGitInfoFor(directory, fetchRemote = true, settings = {}) {
         updateSupported: true,
         currentBranchName: branch,
         currentCommitHash: localCommit,
+        currentCommitAt,
         upstreamCommitHash: upstreamCommit,
         shortCommitHash: localCommit.slice(0, 7),
         isUpToDate: behind === 0,
@@ -290,6 +293,8 @@ async function readServerPlugin(pluginId, directory) {
     const packageJson = await readOptionalJson(path.join(directory, 'package.json'));
     const manifest = await readOptionalJson(path.join(directory, 'manifest.json'));
     const hasEntry = await fileExists(path.join(directory, 'index.js'));
+    let installedAt = '';
+    try { installedAt = (await fsp.stat(directory)).birthtime?.toISOString?.() || ''; } catch (error) {}
     if (!packageJson && !manifest && !hasEntry) return null;
     const source = isObject(manifest) ? manifest : {};
     const pkg = isObject(packageJson) ? packageJson : {};
@@ -305,6 +310,7 @@ async function readServerPlugin(pluginId, directory) {
         name: String(source.display_name || source.displayName || source.name || pkg.displayName || pkg.name || pluginId).trim() || pluginId,
         version: String(source.version || pkg.version || '').trim(),
         description: String(source.description || pkg.description || '').trim(),
+        installedAt,
         githubAuthor,
         isManager: path.resolve(directory) === path.resolve(__dirname),
     };
