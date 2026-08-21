@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.22.0';
+    const SCRIPT_VERSION = '1.22.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -39,6 +39,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.22.1',
+        version: 'v1.22.1',
+        date: '2026-08-21',
+        title: '修复禁用后入口和功能残留',
+        summary: '禁用扩展后会重新核对酒馆状态，并清理目标扩展的脚本、样式和菜单入口。',
+        content: '**修复内容：** 启停操作现在使用酒馆返回的内部扩展名称，保存后立即重新读取状态；只有酒馆确认已经禁用，界面才会显示成功。\n\n禁用时会移除目标扩展的 JS 和 CSS，按插件 ID、中文名和显示名称清理魔法棒菜单入口，并在页面完成两个渲染帧后再检查一次，避免延迟生成的入口残留。单项、多选、检测结果页和白名单页全部使用同一套逻辑。\n\n> **兼容提示：** 若第三方扩展没有实现酒馆的 disable 清理钩子，它已经注册到全局的事件监听或常驻任务无法由管理器安全猜测；管理器会清掉可识别入口，但这类插件的深层运行状态仍可能需要刷新页面。'
+    }, {
         id: 'v1.22.0',
         version: 'v1.22.0',
         date: '2026-08-21',
@@ -255,8 +262,15 @@
     async function setExtensionEnabled(extension, enabled, reload = false) {
         const api = await getExtensionApi();
         const action = enabled ? api.enableExtension : api.disableExtension;
-        if (typeof action !== 'function') throw new Error('当前酒馆版本不支持扩展启停接口');
-        await action(displayPath(extension), reload);
+        if (typeof action !== "function") throw new Error("当前酒馆版本不支持扩展启停接口");
+        const found = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
+        const internalName = found?.name || displayPath(extension);
+        await action(internalName, reload);
+        const current = api.findExtension?.(internalName) || api.findExtension?.(folderOf(extension));
+        if (!current) throw new Error("酒馆未能重新读取扩展启停状态");
+        extension.enabled = current.enabled === true;
+        if (extension.enabled !== enabled) throw new Error("酒馆返回的扩展状态与操作不一致");
+        return current;
     }
 
     function normalizeMeta(value) {
@@ -1595,25 +1609,39 @@
         }
     }
 
-    function extensionScriptElements(extension) {
+    function extensionAssetElements(extension) {
         const folder = folderOf(extension).toLowerCase();
-        const entry = String(extension.manifest?.js || "index.js").toLowerCase();
-        return Array.from(document.scripts || []).filter(script => {
+        const entries = [extension.manifest?.js, extension.manifest?.css].filter(Boolean).map(value => String(value).toLowerCase());
+        return Array.from(document.querySelectorAll("script[src], link[href]")).filter(element => {
+            const source = element.src || element.href || "";
             let pathname = "";
-            try { pathname = new URL(script.src || "", document.baseURI || location.href).pathname.toLowerCase(); } catch (error) {}
-            return pathname.includes("/scripts/extensions/") && pathname.includes("/" + folder + "/") && pathname.endsWith("/" + entry);
+            try { pathname = new URL(source, document.baseURI || location.href).pathname.toLowerCase(); } catch (error) {}
+            return pathname.includes("/scripts/extensions/") && pathname.includes("/" + folder + "/") && (!entries.length || entries.some(entry => pathname.endsWith("/" + entry)));
         });
     }
 
+    function extensionScriptElements(extension) {
+        return extensionAssetElements(extension).filter(element => element.tagName === "SCRIPT");
+    }
+
+    function normalizedMenuText(value) {
+        return String(value || "").normalize("NFKC").toLowerCase().replace(/[\s\-_/.:·()（）]+/g, "");
+    }
     function cleanupExtensionMenuEntries(extension) {
-        const tokens = [folderOf(extension), displayPath(extension)].map(value => String(value || "").toLowerCase()).filter(Boolean);
-        $("#extensionsMenu").find("*").each(function () {
-            const values = ["id", "data-name", "data-extension", "aria-label", "title"].map(attribute => String(this.getAttribute?.(attribute) || "").toLowerCase());
-            if (!values.some(value => tokens.some(token => value === token || value.endsWith("/" + token) || value.includes("-" + token)))) return;
-            const item = $(this).closest(".list-group-item, .menu_button, [role=menuitem], button").first();
-            if (item.length && !item.is("#st-extension-manager-btn")) item.remove();
+        const rawTokens = [folderOf(extension), displayPath(extension), extension.displayName, extension.zhName, extension.manifest?.display_name].map(value => String(value || "").trim()).filter(Boolean);
+        const labels = rawTokens.map(normalizedMenuText).concat(rawTokens.map(value => normalizedMenuText(value.replace(/^(sillytavern|st)[-_ ]*/i, "")))).filter(value => /[^\x00-\x7F]/.test(value) ? value.length >= 2 : value.length >= 4);
+        $("#extensionsMenu").find(".list-group-item, .menu_button, [role=menuitem], button").each(function () {
+            const $candidate = $(this);
+            if ($candidate.is("#st-extension-manager-btn") || $candidate.closest("#st-extension-manager-btn").length) return;
+            const nodes = [this, ...this.querySelectorAll("*")];
+            const attributes = nodes.flatMap(node => ["id", "data-name", "data-extension", "aria-label", "title"].map(attribute => node.getAttribute?.(attribute) || ""));
+            const haystack = normalizedMenuText([this.textContent || "", ...attributes].join(" "));
+            if (!labels.some(label => haystack.includes(label))) return;
+            const $entry = $candidate.closest(".list-group-item, [role=menuitem]").first();
+            ($entry.length ? $entry : $candidate).remove();
         });
     }
+
 
     function currentScriptFor(extension) {
         return extensionScriptElements(extension)[0] || null;
@@ -1625,7 +1653,7 @@
         const cleanupName = `__${folder.replace(/[^a-z0-9_$]/gi, '_')}HotCleanup`;
         if (typeof window[cleanupName] === 'function') { try { window[cleanupName](); } catch (error) {} }
         if (!enabled) {
-            extensionScriptElements(extension).forEach(script => script.remove());
+            extensionAssetElements(extension).forEach(element => element.remove());
             cleanupExtensionMenuEntries(extension);
             if (script) script.remove();
             return true;
@@ -1644,6 +1672,25 @@
             document.body.appendChild(next);
         });
         return true;
+    }
+
+    function nextPaint() {
+        return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+
+    async function toggleExtensionHot(extension, enabled) {
+        await setExtensionEnabled(extension, enabled, false);
+        await hotReload(extension, enabled);
+        await nextPaint();
+        if (!enabled) {
+            extensionAssetElements(extension).forEach(element => element.remove());
+            cleanupExtensionMenuEntries(extension);
+        }
+        const api = await getExtensionApi();
+        const current = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
+        if (!current || current.enabled !== enabled) throw new Error("热更新后扩展状态复核失败");
+        extension.enabled = current.enabled;
+        return current;
     }
 
     async function updateOne(extension, $popup, options = {}) {
@@ -1732,15 +1779,13 @@
                 const extension = targets[index];
                 $status.text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${extension.displayName}`);
                 try {
-                    await setExtensionEnabled(extension, enabled, false);
-                    extension.enabled = enabled;
-                    await hotReload(extension, enabled);
+                    await toggleExtensionHot(extension, enabled);
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${extension.displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，未刷新网页`);
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，状态已重新检测，未刷新网页`);
         } finally {
             state.batchToggling = false;
             renderList($popup);
@@ -2249,14 +2294,12 @@
                 state.togglingExtensions.add(folderOf(extension));
                 renderDetectionResults($popup);
                 try {
-                    await setExtensionEnabled(extension, enabled, false);
-                    extension.enabled = enabled;
-                    await hotReload(extension, enabled);
+                    await toggleExtensionHot(extension, enabled);
                     completed += 1;
                 } catch (error) { if (window.toastr) toastr.error(extension.displayName + ' 处理失败：' + (error.message || error)); }
                 finally { state.togglingExtensions.delete(folderOf(extension)); }
             }
-            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length);
+            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length + '，状态已重新检测');
         } finally {
             state.batchToggling = false;
             detectionResults.action = '';
@@ -2635,15 +2678,13 @@
             for (let index = 0; index < targets.length; index++) {
                 $popup.find('.em-whitelist-batch-status').text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${targets[index].displayName}`);
                 try {
-                    await setExtensionEnabled(targets[index], enabled, false);
-                    targets[index].enabled = enabled;
-                    await hotReload(targets[index], enabled);
+                    await toggleExtensionHot(targets[index], enabled);
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${targets[index].displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，未刷新网页`);
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，状态已重新检测，未刷新网页`);
         } finally {
             state.batchToggling = false;
             renderWhitelistPanel($popup);
@@ -4595,9 +4636,8 @@
             renderList($popup);
             try {
                 const enabled = $(this).attr("data-enable") === "true";
-                await setExtensionEnabled(extension, enabled, false);
-                await hotReload(extension, enabled);
-                extension.enabled = enabled;
+                await toggleExtensionHot(extension, enabled);
+                if (window.toastr) toastr.success(extension.displayName + " 已" + (enabled ? "启用" : "禁用") + "，状态已重新检测");
             } catch (error) {
                 if (window.toastr) toastr.error(`切换失败：${error.message || error}`);
             } finally {
