@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.4';
+    const SCRIPT_VERSION = '1.23.5';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -470,6 +470,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.5',
+        version: 'v1.23.5',
+        date: '2026-08-23',
+        title: '修复新版安装后酒馆卡顿',
+        summary: '禁用入口检查改为一次性流程，完成短时复核后彻底停止，不再持续占用酒馆页面。',
+        content: '**卡顿原因：** 上个版本为了防止插件异步重新插入入口，留下了常驻页面观察器。部分插件频繁更新界面时，会反复触发禁用入口扫描。\n\n**本次修复：** 点击禁用后先立即处理入口，再仅于 150ms、600ms 和 1500ms 复核排队中的异步界面。最后一次复核完成后流程彻底结束，不保留 DOM 监听、轮询或周期扫描；启用插件会立即取消该插件尚未执行的禁用复核。\n\n**后端核对：** 管理后端没有常驻轮询或自动 Git 扫描，仅在用户主动读取、检测或更新时工作，请求完成后即停止，因此本次无需增加后端任务或重启后端。',
+    }, {
         id: 'v1.23.4',
         version: 'v1.23.4',
         date: '2026-08-23',
@@ -553,8 +560,7 @@
     let extensionApiPromise = null;
     let csrfTokenOverride = '';
     let csrfRefreshPromise = null;
-    let extensionUiGuard = null;
-    let extensionUiGuardQueued = false;
+    const extensionUiVerificationTimers = new Map();
 
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
 
@@ -2234,28 +2240,34 @@
     }
 
     function syncExtensionUiEntries() {
-        state.extensions.filter(extension => isExternal(extension) && !extension.enabled).forEach(extension => setExtensionUiEntriesEnabled(extension, false));
+        state.extensions.filter(extension => isExternal(extension) && !extension.enabled)
+            .forEach(extension => setExtensionUiEntriesEnabled(extension, false));
     }
 
-    function scheduleExtensionUiSync() {
-        if (extensionUiGuardQueued) return;
-        extensionUiGuardQueued = true;
-        queueMicrotask(() => {
-            extensionUiGuardQueued = false;
-            syncExtensionUiEntries();
-        });
+    function cancelExtensionUiVerification(owner) {
+        (extensionUiVerificationTimers.get(owner) || []).forEach(timer => window.clearTimeout(timer));
+        extensionUiVerificationTimers.delete(owner);
     }
 
-    function installExtensionUiGuard() {
-        extensionUiGuard?.disconnect();
-        extensionUiGuard = new MutationObserver(mutations => {
-            const needsSync = mutations.some(mutation => Array.from(mutation.addedNodes).some(node => {
-                if (!(node instanceof Element)) return false;
-                return !node.closest(`#${OVERLAY_ID}, #chat, #chat_history`);
-            }));
-            if (needsSync) scheduleExtensionUiSync();
+    function verifyExtensionUiState(extension, enabled) {
+        const owner = folderOf(extension).toLowerCase();
+        cancelExtensionUiVerification(owner);
+        setExtensionUiEntriesEnabled(extension, enabled);
+        if (enabled) return;
+
+        const pending = [];
+        [150, 600, 1500].forEach(delay => {
+            const timer = window.setTimeout(() => {
+                const remaining = (extensionUiVerificationTimers.get(owner) || []).filter(item => item !== timer);
+                if (remaining.length) extensionUiVerificationTimers.set(owner, remaining);
+                else extensionUiVerificationTimers.delete(owner);
+                const current = state.extensions.find(item => folderOf(item).toLowerCase() === owner);
+                if (!current || current.enabled) return;
+                setExtensionUiEntriesEnabled(current, false);
+            }, delay);
+            pending.push(timer);
         });
-        extensionUiGuard.observe(document.documentElement, { childList: true, subtree: true });
+        extensionUiVerificationTimers.set(owner, pending);
     }
 
     function currentScriptFor(extension) {
@@ -2413,27 +2425,28 @@
         const mode = extensionHotToggleMode(extension);
         const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
+        if (enabled) cancelExtensionUiVerification(folder.toLowerCase());
 
         if (isNyFontManager(extension)) {
             if (!enabled) {
-                setExtensionUiEntriesEnabled(extension, false);
+                verifyExtensionUiState(extension, false);
                 extensionHotRuntime.pause(folder);
             }
             await toggleNyFontManagerHot(extension, enabled);
             await setExtensionStylesEnabled(extension, enabled);
             if (enabled) {
                 extensionHotRuntime.resume(folder);
-                setExtensionUiEntriesEnabled(extension, true);
+                verifyExtensionUiState(extension, true);
             }
         } else if (!enabled) {
-            setExtensionUiEntriesEnabled(extension, false);
+            verifyExtensionUiState(extension, false);
             extensionHotRuntime.pause(folder);
             await setExtensionStylesEnabled(extension, false);
         } else {
             await setExtensionStylesEnabled(extension, true);
             const resumed = extensionHotRuntime.resume(folder);
             if (!resumed && !currentScriptFor(extension)) await loadExtensionEntry(extension);
-            setExtensionUiEntriesEnabled(extension, true);
+            verifyExtensionUiState(extension, true);
         }
 
         await nextPaint();
@@ -5476,9 +5489,8 @@
         $menu.append($item);
     }
 
-    installExtensionUiGuard();
     injectStyle();
     timers.push(setTimeout(injectMenu, 500));
     timers.push(setInterval(injectMenu, 2000));
-    window.__extensionManagerCleanup = () => { extensionUiGuard?.disconnect(); extensionUiGuard = null; timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
+    window.__extensionManagerCleanup = () => { extensionUiVerificationTimers.forEach(items => items.forEach(timer => window.clearTimeout(timer))); extensionUiVerificationTimers.clear(); timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
 })();
