@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.0';
+    const SCRIPT_VERSION = '1.23.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -22,6 +22,8 @@
     const FLOAT_POSITION_STORAGE_KEY = 'st-extension-manager-float-position';
     const FRONTEND_META_STORAGE_KEY = 'st-extension-manager-frontend-meta-v1';
     const SETTINGS_STORAGE_KEY = 'st-extension-manager-settings-v1';
+    const NY_FONT_MANAGER_FOLDER = 'ny-font-manager';
+    const NY_FONT_MANAGER_STATE_KEY = 'st-extension-manager-ny-font-state-v1';
     const FLOATING_BALL_MIN = 25;
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
@@ -39,6 +41,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.1',
+        version: 'v1.23.1',
+        date: '2026-08-23',
+        title: '修复扩展启用与禁用兼容性',
+        summary: '按扩展实际生命周期选择热切换或安全刷新，并专门适配 Ny 字体管理器。',
+        content: '**启停修复：** 不再强制把所有扩展当成可以卸载的普通脚本。支持 `hooks.enable/disable`、纯 CSS 或显式清理函数的扩展继续热切换；没有清理生命周期的旧式扩展会保存状态后自动刷新一次，确保事件、定时器和入口真正加载或停止。批量启停会先处理完整批次，再只刷新一次。\n\n**Ny 字体管理器：** 禁用时调用它自己的字体应用与聊天扫描逻辑清除字体效果、动态样式和设置入口；启用时恢复原字体开关、CSS、设置界面和聊天字体扫描，不会因为 ES module 子模块缓存而加载失败。\n\n> 页面刷新只用于无法安全热卸载的旧式扩展，这是浏览器模块和事件监听的限制，不会影响已经支持生命周期的扩展。'
+    }, {
         id: "v1.23.0",
         version: "v1.23.0",
         date: "2026-08-21",
@@ -76,7 +85,7 @@
     }];
     const TUTORIAL_SECTIONS = [
         { id: 'getting-started', title: '一、开始使用与界面', icon: 'fa-compass', items: [{ title: '第一次打开扩展管理器', content: '1. 刷新 SillyTavern 网页，打开顶部的魔法棒菜单。\n2. 点击“扩展管理器”进入主界面。\n3. 顶部三个标签分别是“前端扩展”“后端管理”“安装扩展”。\n4. 标题下方会显示服务端存储是否连接；__未连接时，前端中文名、备注和分组仍会保存在当前浏览器。__' }, { title: '标题栏、主题和关闭按钮', content: '标题栏会显示扩展管理器版本号。右上角太阳或月亮按钮用于切换日间、夜间模式，并会记住选择；叉号用于关闭管理器。点击顶部标签可以随时切换前端、后端和安装设置页面。' }, { title: '收起面板、拖动悬浮球和调整大小', content: '点击右上角收起按钮后，管理器会变成悬浮球，不会中断正在进行的检测。拖动悬浮球可以改变位置，点击悬浮球会恢复完整面板。\n\n在“前端扩展”页上方拖动“悬浮球大小”滑杆，可在 25-56px 之间调整大小；位置和主题保存在浏览器，大小在管理后端连接时保存。' }] },
-        { id: 'frontend', title: '二、前端扩展管理', icon: 'fa-puzzle-piece', items: [{ title: '看懂前端扩展卡片', content: '每张卡片会显示扩展名称、安装类型、所属分组、启用状态、插件 ID、GitHub 作者、版本号、提交号、分支、备注和仓库入口。\n\n“当前用户”只属于当前酒馆账号，“全局”对全部账号可见，“内置”是 SillyTavern 自带扩展。开启隐私打码后，ID、作者和提交号会被模糊。' }, { title: '搜索、取消搜索、筛选、排序和重新读取', content: '在搜索框输入名称、仓库、分组或备注即可过滤列表；点击旁边的“取消搜索”立即恢复完整列表。分组下拉框只显示指定文件夹，排序下拉框可按首字母、安装/更新时间、启用状态、类型或检测状态排列。右侧刷新图标会重新读取 SillyTavern 当前安装的扩展。' }, { title: '检测和更新扩展管理器本体', content: '在“扩展管理器本体”一栏点击“检测”。==发现新版本后才会出现“更新”按钮==；点击更新会拉取新代码并热加载扩展管理器，入口不会消失，也不需要刷新整个网页。' }, { title: '单个扩展的检测、更新、启用和禁用', content: '点击卡片上的“检查”只检测这一项，并留在当前页面。**只有检测到新版本后才会出现“更新”**，避免~~未检测就直接更新~~。\n\n“启用/禁用”调用 SillyTavern 原生接口并热更新目标脚本，不刷新整个网页。启用会重新加载脚本，禁用会先执行扩展清理再移除脚本；如果第三方扩展没有清理函数，可能仍残留它自己创建的页面元素。' }, { title: '如何卸载前端扩展', content: '扩展管理器目前不提供卸载按钮，避免误删插件。请打开 SillyTavern 原生扩展管理页面，找到目标第三方扩展并使用原生卸载功能。若原生页面无法卸载，请先关闭 SillyTavern 后端，确认目录后删除对应的 third-party 扩展文件夹，再重新启动并刷新网页。内置扩展不要手动删除。' }, { title: '编辑中文名、分组和备注', content: '点击“中文资料与分组”，填写中文名、分组或备注后保存。输入新的分组名称会自动形成文件夹；这些只是扩展管理器中的标记，不会移动、改名或修改原始插件目录。' }] },
+        { id: 'frontend', title: '二、前端扩展管理', icon: 'fa-puzzle-piece', items: [{ title: '看懂前端扩展卡片', content: '每张卡片会显示扩展名称、安装类型、所属分组、启用状态、插件 ID、GitHub 作者、版本号、提交号、分支、备注和仓库入口。\n\n“当前用户”只属于当前酒馆账号，“全局”对全部账号可见，“内置”是 SillyTavern 自带扩展。开启隐私打码后，ID、作者和提交号会被模糊。' }, { title: '搜索、取消搜索、筛选、排序和重新读取', content: '在搜索框输入名称、仓库、分组或备注即可过滤列表；点击旁边的“取消搜索”立即恢复完整列表。分组下拉框只显示指定文件夹，排序下拉框可按首字母、安装/更新时间、启用状态、类型或检测状态排列。右侧刷新图标会重新读取 SillyTavern 当前安装的扩展。' }, { title: '检测和更新扩展管理器本体', content: '在“扩展管理器本体”一栏点击“检测”。==发现新版本后才会出现“更新”按钮==；点击更新会拉取新代码并热加载扩展管理器，入口不会消失，也不需要刷新整个网页。' }, { title: '单个扩展的检测、更新、启用和禁用', content: '点击卡片上的“检查”只检测这一项，并留在当前页面。**只有检测到新版本后才会出现“更新”**，避免~~未检测就直接更新~~。\n\n“启用/禁用”调用 SillyTavern 原生接口。支持标准生命周期、纯 CSS 或专用适配的扩展会直接热切换；没有清理接口的旧式扩展会自动刷新一次，确保入口、事件和常驻任务真正加载或停止。批量操作只会在整批完成后刷新一次。Ny 字体管理器已经专门适配，可恢复字体、样式、设置界面和聊天扫描。' }, { title: '如何卸载前端扩展', content: '扩展管理器目前不提供卸载按钮，避免误删插件。请打开 SillyTavern 原生扩展管理页面，找到目标第三方扩展并使用原生卸载功能。若原生页面无法卸载，请先关闭 SillyTavern 后端，确认目录后删除对应的 third-party 扩展文件夹，再重新启动并刷新网页。内置扩展不要手动删除。' }, { title: '编辑中文名、分组和备注', content: '点击“中文资料与分组”，填写中文名、分组或备注后保存。输入新的分组名称会自动形成文件夹；这些只是扩展管理器中的标记，不会移动、改名或修改原始插件目录。' }] },
         { id: 'detection', title: '三、检测、更新与结果页', icon: 'fa-magnifying-glass', items: [{ title: '检测全部、检测分组和检测选中', content: '**“检测更新”只会检查全部非白名单、非内置的前端扩展；**分组标题旁的放大镜只检查该文件夹；进入多选后可使用“检测选中”。后端和白名单页也提供相同的全部、分组和多选检测。\n\n单插件检测不会打开结果页，其他批量检测完成后都会进入本批检测结果页。' }, { title: '查看检测进度和手动取消', content: '检测期间按钮和卡片会显示旋转图标，前端与后端状态栏会显示“已完成/总数”。\n\n> **取消规则：** 点击顶部“取消检测”后，正在检测的项目会完成，==尚未开始的项目会停止==，不会伪造已完成数量。取消后保留已经得到的检测结果。' }, { title: '检测失败、重试和复制报错', content: '==检测失败的卡片会标红==并显示“查看报错”。展开后可以查看原始错误并一键复制诊断信息，复制内容不会包含仓库地址和插件 ID。\n\n列表上方的“重试失败”只重新检查失败项；弱网时也可以在网络恢复后再次检测。' }, { title: '看懂独立检测结果页', content: '批量检测完成后，结果页会直接罗列本批插件，不按原分组拆分。顺序为：检测失败的红色卡片、需要更新的绿色卡片、无需更新的插件，最后是未完成项。\n\n结果页支持搜索、取消搜索、重新检测、一键更新、多选、全选当前、清空、检测选中和更新选中；前端结果还支持启用或禁用。点击左上角返回原管理页面。' }, { title: '一键更新和顺序热更新规则', content: '**“更新全部”只更新本次已经检测并确认有新版本的插件；**“更新选中”也要求所选插件先完成检测。前端扩展会一个接一个更新并尝试热加载，不刷新整个网页。更新完成后会重新读取扩展状态、版本和提交信息。' }, { title: '检测后的临时排序和颜色', content: '除单插件检测外，检测结束后主列表会在每个分组内临时按“失败、可更新、最新、未检测”排序。失败卡片标红，可更新卡片标绿。手动更改排序方式后会退出临时排序。' }] },
         { id: 'batch-groups', title: '四、多选与分组操作', icon: 'fa-list-check', items: [{ title: '如何使用多选模式', content: '点击列表右侧“多选”，再点击卡片左侧选择框。只选一个插件也可以执行多选操作。“全选当前”只选择搜索和筛选后当前可见的项目，“清空”取消全部选择，再次点击“退出多选”返回普通模式。' }, { title: '前端和后端支持哪些批量操作', content: '前端多选支持：分组、加入白名单、检测选中、更新选中、启用选中、禁用选中。\n\n后端多选支持：分组、加入白名单、检测选中和更新选中。所有更新都会先核对检测结果，再逐项执行。白名单页和检测结果页也有对应的多选操作。' }, { title: '创建、展开和管理文件夹分组', content: '在多选工具栏选择已有分组，或选择“新建分组”输入名称，即可把插件标记到文件夹。文件夹默认收起，点击左侧箭头展开或折叠。\n\n文件夹右侧按钮依次可**检测分组、更新分组、整组加入白名单、添加新插件、重命名和解散**。解散只清除分组标记，不会删除插件；分组更新只处理该组内已检测到更新的项目。' }, { title: '内置与未分组文件夹', content: 'SillyTavern 自带的前端扩展会自动归入“内置”文件夹，不需要手动选择。没有自定义分组的项目显示在“未分组”。“内置”和“未分组”是保留名称，不能当作普通自定义分组重命名。\n\n> **内置扩展不参与任何检测或更新**，但仍保留查看仓库、资料和备注等基础按钮。' }] },
         { id: 'backend', title: '五、后端插件管理', icon: 'fa-server', items: [{ title: '后端管理需要什么条件', content: '“后端管理”页面最上方单独显示扩展管理器后端的检测与更新；下方列表读取 SillyTavern/plugins 中安装的其他后端插件。要使用读取、分组、白名单、检测和更新能力，必须先安装扩展管理器后端，并在 config.yaml 中启用服务端插件，然后手动重启 SillyTavern。' }, { title: '读取和查看后端插件信息', content: '点击“读取插件”刷新列表。后端页支持搜索、取消搜索、分组筛选、按名称或更新状态排序。卡片会显示插件 ID、GitHub 作者、版本号、提交号、分支、备注和是否支持自动更新，便于核对实际安装代码。' }, { title: '后端检测、更新和重启规则', content: '页面顶部可单独检测和更新扩展管理器后端；普通“检测全部”和“更新全部”只处理下方的其他后端插件。其他插件可以检测全部、单个、分组或选中项，只有检测到更新的独立 Git 仓库才允许更新，管理器会依次执行安全的 git pull --ff-only。\n\n> **后端更新不会自动停止或重启 SillyTavern。** 全部完成后==必须由用户手动重启==，更新后的后端代码才会生效。' }, { title: '后端中文资料、分组和多选', content: '管理后端连接后，可为后端插件保存中文名、备注和文件夹分组。文件夹支持展开、检测、更新、添加、重命名和解散；多选支持分组、加入白名单、检测和顺序更新，操作方式与前端页一致。后端插件不提供前端扩展的启用/禁用按钮。' }] },
@@ -1697,17 +1706,112 @@
         return extensionScriptElements(extension)[0] || null;
     }
 
+    function isNyFontManager(extension) {
+        return folderOf(extension).toLowerCase() === NY_FONT_MANAGER_FOLDER;
+    }
+
+    function readNyFontManagerState() {
+        try {
+            const value = JSON.parse(window.sessionStorage.getItem(NY_FONT_MANAGER_STATE_KEY) || 'null');
+            return value && typeof value === 'object' ? value : null;
+        } catch (error) { return null; }
+    }
+
+    function storeNyFontManagerState(value) {
+        try {
+            if (value) window.sessionStorage.setItem(NY_FONT_MANAGER_STATE_KEY, JSON.stringify(value));
+            else window.sessionStorage.removeItem(NY_FONT_MANAGER_STATE_KEY);
+        } catch (error) {}
+    }
+
+    function extensionFileUrl(extension, file) {
+        return new URL(`/scripts/extensions/${displayPath(extension)}/${file}`, document.baseURI || location.href).href;
+    }
+
+    async function ensureExtensionStyle(extension) {
+        const css = String(extension.manifest?.css || '').trim();
+        if (!css || extensionAssetElements(extension).some(element => element.tagName === 'LINK')) return;
+        const url = new URL(extensionFileUrl(extension, css));
+        url.searchParams.set('em_update', Date.now());
+        await new Promise((resolve, reject) => {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = url.href;
+            link.dataset.extensionManagerHot = '1';
+            link.onload = resolve;
+            link.onerror = () => reject(new Error('重新加载扩展样式失败'));
+            document.head.appendChild(link);
+        });
+    }
+
+    async function toggleNyFontManagerHot(extension, enabled) {
+        if (!isNyFontManager(extension)) return false;
+        const [stateModule, coreModule] = await Promise.all([
+            import(extensionFileUrl(extension, 'nytwState.js')),
+            import(extensionFileUrl(extension, 'nytwCore.js')),
+        ]);
+        const nySettings = stateModule?.settings;
+        if (!nySettings || typeof nySettings !== 'object') throw new Error('无法读取 Ny 字体管理器设置');
+
+        if (!enabled) {
+            if (!readNyFontManagerState()) {
+                storeNyFontManagerState({
+                    fontsEnabled: nySettings.fontsEnabled !== false,
+                    chatFontImportEnabled: nySettings.chatFontImportEnabled === true,
+                });
+            }
+            nySettings.fontsEnabled = false;
+            nySettings.chatFontImportEnabled = false;
+            coreModule.queueApplyFonts?.();
+            coreModule.scheduleScan?.({ full: true });
+            await nextPaint();
+            document.getElementById('nytw_settings_root')?.remove();
+            document.getElementById('nytw-reading-style')?.remove();
+            document.getElementById('nytw-font-style')?.remove();
+            document.querySelectorAll('link[data-nytw-font-css]').forEach(element => element.remove());
+            document.querySelectorAll('link[data-st-chat-font-importer]').forEach(element => { element.disabled = true; });
+            return true;
+        }
+
+        const previous = readNyFontManagerState();
+        if (previous) {
+            nySettings.fontsEnabled = previous.fontsEnabled !== false;
+            nySettings.chatFontImportEnabled = previous.chatFontImportEnabled === true;
+            storeNyFontManagerState(null);
+        }
+        await ensureExtensionStyle(extension);
+        document.querySelectorAll('link[data-st-chat-font-importer]').forEach(element => { element.disabled = false; });
+        const [settingsUiModule, importerModule] = await Promise.all([
+            import(extensionFileUrl(extension, 'nytwSettingsUi.js')),
+            import(extensionFileUrl(extension, 'nytwChatFontImporter.js')),
+        ]);
+        coreModule.queueApplyFonts?.();
+        coreModule.scheduleScan?.({ full: true });
+        await settingsUiModule.setupSettingsUi?.();
+        if (typeof globalThis.nytwChatFontImporterRescan === 'function') importerModule.importer_scheduleScan?.('extension-manager-enable');
+        else importerModule.initChatFontImporter?.();
+        return true;
+    }
+
     async function hotReload(extension, enabled = true) {
         const script = currentScriptFor(extension);
         const folder = folderOf(extension);
         const cleanupName = `__${folder.replace(/[^a-z0-9_$]/gi, '_')}HotCleanup`;
         if (typeof window[cleanupName] === 'function') { try { window[cleanupName](); } catch (error) {} }
+        if (await toggleNyFontManagerHot(extension, enabled)) {
+            if (!enabled) {
+                extensionAssetElements(extension).forEach(element => element.remove());
+                cleanupExtensionMenuEntries(extension);
+            }
+            return true;
+        }
         if (!enabled) {
             extensionAssetElements(extension).forEach(element => element.remove());
             cleanupExtensionMenuEntries(extension);
             if (script) script.remove();
             return true;
         }
+        await ensureExtensionStyle(extension);
         const source = script?.src || `/scripts/extensions/${displayPath(extension)}/${extension.manifest?.js || 'index.js'}`;
         const url = new URL(source, document.baseURI || location.href);
         url.searchParams.set('em_update', Date.now());
@@ -1728,19 +1832,52 @@
         return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }
 
+    function extensionCleanupName(extension) {
+        return `__${folderOf(extension).replace(/[^a-z0-9_$]/gi, '_')}HotCleanup`;
+    }
+
+    function extensionHotToggleMode(extension) {
+        if (isNyFontManager(extension)) return 'ny-font-manager';
+        const hooks = extension.manifest?.hooks;
+        if (hooks && typeof hooks.enable === 'string' && typeof hooks.disable === 'string') return 'lifecycle-hooks';
+        if (!String(extension.manifest?.js || '').trim() && String(extension.manifest?.css || '').trim()) return 'css-only';
+        if (typeof window[extensionCleanupName(extension)] === 'function') return 'cleanup-hook';
+        return 'reload';
+    }
+
+    async function setExtensionStylesEnabled(extension, enabled) {
+        if (enabled) await ensureExtensionStyle(extension);
+        extensionAssetElements(extension)
+            .filter(element => element.tagName === 'LINK')
+            .forEach(element => { element.disabled = !enabled; });
+    }
+
     async function toggleExtensionHot(extension, enabled) {
+        const requestedMode = extensionHotToggleMode(extension);
+        let appliedMode = requestedMode;
         await setExtensionEnabled(extension, enabled, false);
-        await hotReload(extension, enabled);
-        await nextPaint();
-        if (!enabled) {
-            extensionAssetElements(extension).forEach(element => element.remove());
-            cleanupExtensionMenuEntries(extension);
+        try {
+            if (requestedMode === 'ny-font-manager' || requestedMode === 'cleanup-hook') {
+                await hotReload(extension, enabled);
+            } else if (requestedMode === 'lifecycle-hooks' || requestedMode === 'css-only') {
+                await setExtensionStylesEnabled(extension, enabled);
+            }
+        } catch (error) {
+            appliedMode = 'reload';
+            console.warn('[Extension Manager] Hot toggle failed; falling back to a page reload.', folderOf(extension), error);
         }
+        await nextPaint();
         const api = await getExtensionApi();
         const current = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
-        if (!current || current.enabled !== enabled) throw new Error("热更新后扩展状态复核失败");
+        if (!current || current.enabled !== enabled) throw new Error('扩展状态复核失败');
         extension.enabled = current.enabled;
-        return current;
+        return { ...current, hot: appliedMode !== 'reload', reloadRequired: appliedMode === 'reload', mode: appliedMode };
+    }
+
+    function scheduleExtensionStateReload() {
+        if (window.__extensionManagerStateReloadPending) return;
+        window.__extensionManagerStateReloadPending = true;
+        window.setTimeout(() => window.location.reload(), 350);
     }
 
     async function updateOne(extension, $popup, options = {}) {
@@ -1825,18 +1962,21 @@
         renderBatchSelection($popup);
         const $status = $popup.find('.em-batch-update-status');
         let completed = 0;
+        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 const extension = targets[index];
                 $status.text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${extension.displayName}`);
                 try {
-                    await toggleExtensionHot(extension, enabled);
+                    const result = await toggleExtensionHot(extension, enabled);
+                    reloadRequired ||= result.reloadRequired;
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${extension.displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，状态已重新检测，未刷新网页`);
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}${reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'}`);
+            if (reloadRequired) scheduleExtensionStateReload();
         } finally {
             state.batchToggling = false;
             renderList($popup);
@@ -2368,6 +2508,7 @@
         detectionResults.action = enabled ? 'enabling' : 'disabling';
         renderDetectionResults($popup);
         let completed = 0;
+        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 const extension = targets[index];
@@ -2375,12 +2516,14 @@
                 state.togglingExtensions.add(folderOf(extension));
                 renderDetectionResults($popup);
                 try {
-                    await toggleExtensionHot(extension, enabled);
+                    const result = await toggleExtensionHot(extension, enabled);
+                    reloadRequired ||= result.reloadRequired;
                     completed += 1;
                 } catch (error) { if (window.toastr) toastr.error(extension.displayName + ' 处理失败：' + (error.message || error)); }
                 finally { state.togglingExtensions.delete(folderOf(extension)); }
             }
-            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length + '，状态已重新检测');
+            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length + (reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'));
+            if (reloadRequired) scheduleExtensionStateReload();
         } finally {
             state.batchToggling = false;
             detectionResults.action = '';
@@ -2751,17 +2894,20 @@
         state.batchToggling = true;
         renderWhitelistPanel($popup);
         let completed = 0;
+        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 $popup.find('.em-whitelist-batch-status').text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${targets[index].displayName}`);
                 try {
-                    await toggleExtensionHot(targets[index], enabled);
+                    const result = await toggleExtensionHot(targets[index], enabled);
+                    reloadRequired ||= result.reloadRequired;
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${targets[index].displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，状态已重新检测，未刷新网页`);
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}${reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'}`);
+            if (reloadRequired) scheduleExtensionStateReload();
         } finally {
             state.batchToggling = false;
             renderWhitelistPanel($popup);
@@ -4726,8 +4872,11 @@
             renderList($popup);
             try {
                 const enabled = $(this).attr("data-enable") === "true";
-                await toggleExtensionHot(extension, enabled);
-                if (window.toastr) toastr.success(extension.displayName + " 已" + (enabled ? "启用" : "禁用") + "，状态已重新检测");
+                const result = await toggleExtensionHot(extension, enabled);
+                if (result.reloadRequired) {
+                    if (window.toastr) toastr.info(extension.displayName + ' 状态已保存；该扩展未提供热启停接口，正在刷新页面以完整' + (enabled ? '加载' : '停止'));
+                    scheduleExtensionStateReload();
+                } else if (window.toastr) toastr.success(extension.displayName + ' 已' + (enabled ? '启用' : '禁用') + '并热切换');
             } catch (error) {
                 if (window.toastr) toastr.error(`切换失败：${error.message || error}`);
             } finally {
