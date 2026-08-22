@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.3';
+    const SCRIPT_VERSION = '1.23.4';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -154,7 +154,7 @@
             nodes.filter(node => node instanceof Element
                 && !['SCRIPT', 'LINK', 'STYLE', 'META'].includes(node.tagName)
                 && !node.closest?.(`#${OVERLAY_ID}, #chat, #chat_history`)
-                && (node.closest?.('#extensions_settings, #extensionsMenu, #movingDivs') || node.parentElement === document.body))
+                && (node.closest?.('[id^="extensions_settings"], #extensionsMenu, #movingDivs') || node.parentElement === document.body))
                 .forEach(node => { store.nodes.add(node); if (paused.has(owner)) hideNode(node); });
         };
         const inserted = node => node instanceof DocumentFragment ? Array.from(node.children) : (node instanceof Element ? [node] : []);
@@ -470,6 +470,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.4',
+        version: 'v1.23.4',
+        date: '2026-08-23',
+        title: '修复部分插件禁用后设置入口仍然存在',
+        summary: '扩展管理页的设置块和延迟创建的入口现在会随插件禁用立即隐藏。',
+        content: '**设置页兼容：** SillyTavern 和部分插件会把设置界面放进 `extensions_settings2` 等设置容器。过去管理器只扫描旧容器，像羁绊助手这样的设置块就可能在禁用后继续显示；现在会识别全部扩展设置容器，并按插件显示名收回整块设置界面。\n\n**持续守卫：** 禁用后会继续观察插件界面。如果插件通过异步任务再次插入按钮、抽屉或设置块，新入口也会立即隐藏；启用时则原地恢复，不刷新浏览器。',
+    }, {
         id: 'v1.23.3',
         version: 'v1.23.3',
         date: '2026-08-23',
@@ -546,6 +553,8 @@
     let extensionApiPromise = null;
     let csrfTokenOverride = '';
     let csrfRefreshPromise = null;
+    let extensionUiGuard = null;
+    let extensionUiGuardQueued = false;
 
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
 
@@ -962,6 +971,7 @@
             return extension;
         }));
         state.extensions = enriched.filter(item => item.name);
+        syncExtensionUiEntries();
         return state.extensions;
     }
 
@@ -2130,51 +2140,122 @@
         return String(value || "").normalize("NFKC").toLowerCase().replace(/[\s\-_/.:·()（）]+/g, "");
     }
 
+    function extensionUiLabels(extension) {
+        const rawTokens = [folderOf(extension), displayPath(extension), extension.manifest?.display_name]
+            .map(value => String(value || '').trim())
+            .filter(Boolean);
+        return Array.from(new Set(rawTokens
+            .flatMap(value => [value, value.replace(/^(sillytavern|st)[-_ ]*/i, '')])
+            .map(normalizedMenuText)
+            .filter(value => /[^\x00-\x7F]/.test(value) ? value.length >= 2 : value.length >= 4)));
+    }
+
+    function extensionUiMetadata(node, includeText = false, includeDescendants = false) {
+        if (!(node instanceof Element)) return '';
+        const nodes = includeDescendants ? [node, ...node.querySelectorAll('*')] : [node];
+        const attributes = nodes.flatMap(item => [
+            'id', 'class', 'data-name', 'data-extension', 'data-plugin', 'data-extension-name',
+            'aria-label', 'title', 'href', 'for',
+        ].map(attribute => item.getAttribute?.(attribute) || ''));
+        return normalizedMenuText([includeText ? node.textContent || '' : '', ...attributes].join(' '));
+    }
+
+    function matchesExtensionUi(node, labels, includeText = false, includeDescendants = false) {
+        const haystack = extensionUiMetadata(node, includeText, includeDescendants);
+        return Boolean(haystack && labels.some(label => haystack.includes(label)));
+    }
+
+    function settingEntryRoot(candidate, surface) {
+        const extensionRoot = candidate.closest('[data-extension], [data-plugin], [data-extension-name], [class*="extension-settings"], [class*="extension_settings"]');
+        const preferred = extensionRoot || candidate.closest('.inline-drawer');
+        if (preferred && preferred !== surface && surface.contains(preferred)) return preferred;
+        let root = candidate;
+        while (root.parentElement && root.parentElement !== surface) root = root.parentElement;
+        return root === surface ? candidate : root;
+    }
+
     function rememberExtensionUiEntries(extension) {
         const folder = folderOf(extension);
         const entries = new Set();
-        const rawTokens = [folderOf(extension), displayPath(extension), extension.displayName, extension.zhName, extension.manifest?.display_name].map(value => String(value || "").trim()).filter(Boolean);
-        const labels = rawTokens.map(normalizedMenuText).concat(rawTokens.map(value => normalizedMenuText(value.replace(/^(sillytavern|st)[-_ ]*/i, "")))).filter(value => /[^\x00-\x7F]/.test(value) ? value.length >= 2 : value.length >= 4);
+        const labels = extensionUiLabels(extension);
+        const remember = node => {
+            if (!(node instanceof Element) || node.closest?.(`#${OVERLAY_ID}`)) return;
+            entries.add(node);
+            extensionHotRuntime.trackNode(folder, node);
+        };
         $("#extensionsMenu").find(".list-group-item, .menu_button, [role=menuitem], button").each(function () {
             const $candidate = $(this);
             if ($candidate.is("#st-extension-manager-btn") || $candidate.closest("#st-extension-manager-btn").length) return;
-            const nodes = [this, ...this.querySelectorAll("*")];
-            const attributes = nodes.flatMap(node => ["id", "data-name", "data-extension", "aria-label", "title"].map(attribute => node.getAttribute?.(attribute) || ""));
-            const haystack = normalizedMenuText([this.textContent || "", ...attributes].join(" "));
-            if (!labels.some(label => haystack.includes(label))) return;
+            if (!matchesExtensionUi(this, labels, true, true)) return;
             const $entry = $candidate.closest(".list-group-item, [role=menuitem]").first();
-            const entry = ($entry.length ? $entry : $candidate)[0];
-            entries.add(entry);
-            extensionHotRuntime.trackNode(folder, entry);
+            remember(($entry.length ? $entry : $candidate)[0]);
         });
-        $("#extensions_settings").find("[id], [data-extension], [data-name]").each(function () {
-            if ($(this).closest(`#${OVERLAY_ID}`).length) return;
-            const attributes = ["id", "class", "data-name", "data-extension", "aria-label", "title"].map(attribute => this.getAttribute?.(attribute) || "");
-            const haystack = normalizedMenuText(attributes.join(" "));
-            if (!labels.some(label => haystack.includes(label))) return;
-            entries.add(this);
-            extensionHotRuntime.trackNode(folder, this);
+        document.querySelectorAll('[id^="extensions_settings"]').forEach(surface => {
+            surface.querySelectorAll('[id], [class], [data-extension], [data-name], [data-plugin], [data-extension-name], [aria-label], [title]').forEach(candidate => {
+                if (matchesExtensionUi(candidate, labels, false)) remember(settingEntryRoot(candidate, surface));
+            });
+            surface.querySelectorAll('.inline-drawer-header, .inline-drawer-toggle, [role="heading"], h1, h2, h3, h4, h5, h6, legend, b, strong').forEach(candidate => {
+                if (matchesExtensionUi(candidate, labels, true)) remember(settingEntryRoot(candidate, surface));
+            });
+        });
+        document.querySelectorAll('#movingDivs > *, body > [data-extension], body > [data-plugin], body > [data-extension-name]').forEach(candidate => {
+            if (matchesExtensionUi(candidate, labels, false)) remember(candidate);
         });
         return entries;
     }
 
+    function applyExtensionUiEntryState(node, enabled, owner) {
+        if (!(node instanceof Element)) return;
+        if (!enabled) {
+            if (node.dataset.emHotOwner && node.dataset.emHotOwner !== owner) return;
+            node.dataset.emHotOwner = owner;
+            if (node.dataset.emHotHidden === '1') return;
+            node.dataset.emHotHidden = '1';
+            node.dataset.emHotDisplay = node.style.display || '';
+            node.style.setProperty('display', 'none', 'important');
+            return;
+        }
+        if (node.dataset.emHotOwner && node.dataset.emHotOwner !== owner) return;
+        if (node.dataset.emHotHidden !== '1') {
+            delete node.dataset.emHotOwner;
+            return;
+        }
+        const display = node.dataset.emHotDisplay || '';
+        delete node.dataset.emHotHidden;
+        delete node.dataset.emHotDisplay;
+        delete node.dataset.emHotOwner;
+        node.style.removeProperty('display');
+        if (display) node.style.display = display;
+    }
+
     function setExtensionUiEntriesEnabled(extension, enabled) {
-        rememberExtensionUiEntries(extension).forEach(node => {
-            if (!(node instanceof Element)) return;
-            if (!enabled) {
-                if (node.dataset.emHotHidden === '1') return;
-                node.dataset.emHotHidden = '1';
-                node.dataset.emHotDisplay = node.style.display || '';
-                node.style.setProperty('display', 'none', 'important');
-                return;
-            }
-            if (node.dataset.emHotHidden !== '1') return;
-            const display = node.dataset.emHotDisplay || '';
-            delete node.dataset.emHotHidden;
-            delete node.dataset.emHotDisplay;
-            node.style.removeProperty('display');
-            if (display) node.style.display = display;
+        const owner = folderOf(extension).toLowerCase();
+        rememberExtensionUiEntries(extension).forEach(node => applyExtensionUiEntryState(node, enabled, owner));
+    }
+
+    function syncExtensionUiEntries() {
+        state.extensions.filter(extension => isExternal(extension) && !extension.enabled).forEach(extension => setExtensionUiEntriesEnabled(extension, false));
+    }
+
+    function scheduleExtensionUiSync() {
+        if (extensionUiGuardQueued) return;
+        extensionUiGuardQueued = true;
+        queueMicrotask(() => {
+            extensionUiGuardQueued = false;
+            syncExtensionUiEntries();
         });
+    }
+
+    function installExtensionUiGuard() {
+        extensionUiGuard?.disconnect();
+        extensionUiGuard = new MutationObserver(mutations => {
+            const needsSync = mutations.some(mutation => Array.from(mutation.addedNodes).some(node => {
+                if (!(node instanceof Element)) return false;
+                return !node.closest(`#${OVERLAY_ID}, #chat, #chat_history`);
+            }));
+            if (needsSync) scheduleExtensionUiSync();
+        });
+        extensionUiGuard.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     function currentScriptFor(extension) {
@@ -5395,8 +5476,9 @@
         $menu.append($item);
     }
 
+    installExtensionUiGuard();
     injectStyle();
     timers.push(setTimeout(injectMenu, 500));
     timers.push(setInterval(injectMenu, 2000));
-    window.__extensionManagerCleanup = () => { timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
+    window.__extensionManagerCleanup = () => { extensionUiGuard?.disconnect(); extensionUiGuard = null; timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
 })();
