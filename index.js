@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.1';
+    const SCRIPT_VERSION = '1.23.2';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -24,6 +24,7 @@
     const SETTINGS_STORAGE_KEY = 'st-extension-manager-settings-v1';
     const NY_FONT_MANAGER_FOLDER = 'ny-font-manager';
     const NY_FONT_MANAGER_STATE_KEY = 'st-extension-manager-ny-font-state-v1';
+    const HOT_RUNTIME_KEY = '__extensionManagerHotRuntime';
     const FLOATING_BALL_MIN = 25;
     const FLOATING_BALL_MAX = 56;
     const FLOATING_BALL_DEFAULT = 34;
@@ -31,6 +32,418 @@
     const NETWORK_DETECTION_CONCURRENCY = 2;
     const STANDARD_DETECTION_CONCURRENCY = 6;
     const NETWORK_RETRY_DELAYS = [1200, 3200];
+
+    function installExtensionHotRuntime() {
+        if (window[HOT_RUNTIME_KEY]?.version >= 1) return window[HOT_RUNTIME_KEY];
+
+        const pathPattern = /\/scripts\/extensions\/(?:third-party\/)?([^/?#]+)\//i;
+        const managerFolder = (() => {
+            const currentPath = (() => {
+                try { return new URL(INITIAL_SCRIPT_URL, document.baseURI || location.href).pathname; }
+                catch (error) { return ''; }
+            })();
+            const detected = currentPath.match(pathPattern)?.[1] || String(new Error().stack || '').match(pathPattern)?.[1] || EXTENSION_DEFAULT_FOLDER;
+            try { return decodeURIComponent(detected).toLowerCase(); } catch (error) { return String(detected).toLowerCase(); }
+        })();
+        const original = {
+            addEvent: EventTarget.prototype.addEventListener,
+            removeEvent: EventTarget.prototype.removeEventListener,
+            setTimeout: window.setTimeout.bind(window),
+            clearTimeout: window.clearTimeout.bind(window),
+            setInterval: window.setInterval.bind(window),
+            clearInterval: window.clearInterval.bind(window),
+            requestFrame: window.requestAnimationFrame.bind(window),
+            cancelFrame: window.cancelAnimationFrame.bind(window),
+            appendChild: Node.prototype.appendChild,
+            insertBefore: Node.prototype.insertBefore,
+            replaceChild: Node.prototype.replaceChild,
+            insertHtml: Element.prototype.insertAdjacentHTML,
+        };
+        const resources = new Map();
+        const observers = new WeakMap();
+        const paused = new Set();
+        let activeOwner = '';
+        let skipNativeEvent = 0;
+        let skipSourceEvent = 0;
+        let jqueryReady = false;
+        let sourceReady = false;
+
+        const normalize = value => String(value || '').replace(/^third-party\//i, '').toLowerCase();
+        const ownerFromStack = () => {
+            for (const line of String(new Error().stack || '').split('\n')) {
+                const match = line.match(pathPattern);
+                if (!match) continue;
+                let owner = '';
+                try { owner = normalize(decodeURIComponent(match[1])); }
+                catch (error) { owner = normalize(match[1]); }
+                if (owner && owner !== managerFolder) return owner;
+            }
+            return '';
+        };
+        const currentOwner = () => activeOwner || ownerFromStack();
+        const canTrack = owner => Boolean(owner && owner !== managerFolder);
+        const bucket = owner => {
+            const key = normalize(owner);
+            if (!resources.has(key)) resources.set(key, { events: [], jquery: [], source: [], timers: [], frames: [], observers: [], nodes: new Set(), styles: new Set() });
+            return resources.get(key);
+        };
+        const runOwned = (owner, callback, thisArg, args = []) => {
+            const previous = activeOwner;
+            activeOwner = normalize(owner);
+            try { return callback.apply(thisArg, args); }
+            finally { activeOwner = previous; }
+        };
+        const wrapCallback = (owner, callback, after) => typeof callback !== 'function' ? callback : function (...args) {
+            try { return runOwned(owner, callback, this, args); }
+            finally { after?.(); }
+        };
+        const hideNode = node => {
+            if (!(node instanceof Element) || node.dataset.emHotHidden === '1') return;
+            node.dataset.emHotHidden = '1';
+            node.dataset.emHotDisplay = node.style.display || '';
+            node.style.setProperty('display', 'none', 'important');
+        };
+        const showNode = node => {
+            if (!(node instanceof Element) || node.dataset.emHotHidden !== '1') return;
+            const display = node.dataset.emHotDisplay || '';
+            delete node.dataset.emHotHidden;
+            delete node.dataset.emHotDisplay;
+            node.style.removeProperty('display');
+            if (display) node.style.display = display;
+        };
+        const disableStyle = node => {
+            if (!(node instanceof Element) || node.dataset.emHotStyleDisabled === '1') return;
+            node.dataset.emHotStyleDisabled = '1';
+            if (node.tagName === 'LINK') {
+                node.dataset.emHotWasDisabled = node.disabled ? '1' : '0';
+                node.disabled = true;
+            } else {
+                node.dataset.emHotMedia = node.getAttribute('media') || '';
+                node.setAttribute('media', 'not all');
+            }
+        };
+        const enableStyle = node => {
+            if (!(node instanceof Element) || node.dataset.emHotStyleDisabled !== '1') return;
+            if (node.tagName === 'LINK') node.disabled = node.dataset.emHotWasDisabled === '1';
+            else if (node.dataset.emHotMedia) node.setAttribute('media', node.dataset.emHotMedia);
+            else node.removeAttribute('media');
+            delete node.dataset.emHotStyleDisabled;
+            delete node.dataset.emHotWasDisabled;
+            delete node.dataset.emHotMedia;
+        };
+        const rememberNodes = (owner, nodes) => {
+            if (!canTrack(owner)) return;
+            const store = bucket(owner);
+            nodes.filter(node => node instanceof Element && ['LINK', 'STYLE'].includes(node.tagName)).forEach(node => {
+                store.styles.add(node);
+                if (paused.has(owner)) disableStyle(node);
+            });
+            nodes.filter(node => node instanceof Element
+                && !['SCRIPT', 'LINK', 'STYLE', 'META'].includes(node.tagName)
+                && !node.closest?.(`#${OVERLAY_ID}, #chat, #chat_history`)
+                && (node.closest?.('#extensions_settings, #extensionsMenu, #movingDivs') || node.parentElement === document.body))
+                .forEach(node => { store.nodes.add(node); if (paused.has(owner)) hideNode(node); });
+        };
+        const inserted = node => node instanceof DocumentFragment ? Array.from(node.children) : (node instanceof Element ? [node] : []);
+
+        EventTarget.prototype.addEventListener = function (type, listener, options) {
+            const owner = skipNativeEvent ? '' : currentOwner();
+            if (!canTrack(owner) || !listener) return original.addEvent.call(this, type, listener, options);
+            const item = { target: this, type, listener, registered: listener, options, active: true, removed: false };
+            if (typeof options === 'object' && options?.once) {
+                item.registered = function (...args) {
+                    item.active = false;
+                    item.removed = true;
+                    return typeof listener === 'function' ? listener.apply(this, args) : listener.handleEvent?.apply(listener, args);
+                };
+            }
+            const result = original.addEvent.call(this, type, item.registered, options);
+            bucket(owner).events.push(item);
+            if (paused.has(owner)) { original.removeEvent.call(this, type, item.registered, options); item.active = false; }
+            return result;
+        };
+        EventTarget.prototype.removeEventListener = function (type, listener, options) {
+            let registered = listener;
+            resources.forEach(store => store.events.forEach(item => {
+                if (item.target === this && item.type === type && item.listener === listener) {
+                    item.active = false;
+                    item.removed = true;
+                    registered = item.registered;
+                }
+            }));
+            return original.removeEvent.call(this, type, registered, options);
+        };
+
+        const registerTimer = (kind, callback, delay, args) => {
+            const owner = currentOwner();
+            if (!canTrack(owner) || typeof callback !== 'function') return original[kind](callback, delay, ...args);
+            const item = { kind, delay, args, handle: 0, active: true, removed: false };
+            const isTimeout = kind === 'setTimeout';
+            item.callback = wrapCallback(owner, callback, isTimeout ? () => { item.active = false; item.removed = true; } : undefined);
+            item.handle = original[kind](item.callback, delay, ...args);
+            bucket(owner).timers.push(item);
+            if (paused.has(owner)) { original[isTimeout ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; }
+            return item.handle;
+        };
+        window.setTimeout = (callback, delay, ...args) => registerTimer('setTimeout', callback, delay, args);
+        window.setInterval = (callback, delay, ...args) => registerTimer('setInterval', callback, delay, args);
+        const clearTimer = (kind, handle) => {
+            resources.forEach(store => store.timers.forEach(item => {
+                if (item.handle === handle) { item.active = false; item.removed = true; }
+            }));
+            return original[kind](handle);
+        };
+        window.clearTimeout = handle => clearTimer('clearTimeout', handle);
+        window.clearInterval = handle => clearTimer('clearInterval', handle);
+        window.requestAnimationFrame = callback => {
+            const owner = currentOwner();
+            if (!canTrack(owner) || typeof callback !== 'function') return original.requestFrame(callback);
+            const item = { handle: 0, active: true, removed: false };
+            item.callback = wrapCallback(owner, callback, () => { item.active = false; item.removed = true; });
+            item.handle = original.requestFrame(item.callback);
+            bucket(owner).frames.push(item);
+            if (paused.has(owner)) { original.cancelFrame(item.handle); item.active = false; }
+            return item.handle;
+        };
+        window.cancelAnimationFrame = handle => {
+            resources.forEach(store => store.frames.forEach(item => {
+                if (item.handle === handle) { item.active = false; item.removed = true; }
+            }));
+            return original.cancelFrame(handle);
+        };
+
+        Node.prototype.appendChild = function (node) {
+            const owner = currentOwner();
+            const nodes = inserted(node);
+            const result = original.appendChild.call(this, node);
+            rememberNodes(owner, nodes);
+            return result;
+        };
+        Node.prototype.insertBefore = function (node, reference) {
+            const owner = currentOwner();
+            const nodes = inserted(node);
+            const result = original.insertBefore.call(this, node, reference);
+            rememberNodes(owner, nodes);
+            return result;
+        };
+        Node.prototype.replaceChild = function (node, oldNode) {
+            const owner = currentOwner();
+            const nodes = inserted(node);
+            const result = original.replaceChild.call(this, node, oldNode);
+            rememberNodes(owner, nodes);
+            return result;
+        };
+        Element.prototype.insertAdjacentHTML = function (position, html) {
+            const owner = currentOwner();
+            const parent = /beforebegin|afterend/i.test(position) ? this.parentElement : this;
+            const before = new Set(parent?.children || []);
+            const result = original.insertHtml.call(this, position, html);
+            rememberNodes(owner, Array.from(parent?.children || []).filter(node => !before.has(node)));
+            return result;
+        };
+
+        const installObserver = type => {
+            const NativeObserver = window[type];
+            if (typeof NativeObserver !== 'function') return;
+            const observe = NativeObserver.prototype.observe;
+            const disconnect = NativeObserver.prototype.disconnect;
+            function ManagedObserver(callback) {
+                const owner = currentOwner();
+                if (!canTrack(owner)) return new NativeObserver(callback);
+                const item = { owner, type, instance: null, targets: [], active: true, removed: false };
+                item.instance = new NativeObserver(wrapCallback(owner, callback));
+                observers.set(item.instance, item);
+                bucket(owner).observers.push(item);
+                if (paused.has(owner)) item.active = false;
+                return item.instance;
+            }
+            ManagedObserver.prototype = NativeObserver.prototype;
+            Object.setPrototypeOf(ManagedObserver, NativeObserver);
+            NativeObserver.prototype.observe = function (target, options) {
+                const item = observers.get(this);
+                if (item) {
+                    const known = item.targets.find(entry => entry.target === target);
+                    if (known) known.options = options;
+                    else item.targets.push({ target, options });
+                    item.removed = false;
+                    if (paused.has(item.owner)) return;
+                    item.active = true;
+                }
+                return observe.call(this, target, options);
+            };
+            NativeObserver.prototype.disconnect = function () {
+                const item = observers.get(this);
+                if (item) { item.active = false; item.removed = true; item.targets = []; }
+                return disconnect.call(this);
+            };
+            original[type] = { observe, disconnect };
+            window[type] = ManagedObserver;
+        };
+        ['MutationObserver', 'ResizeObserver', 'IntersectionObserver'].forEach(installObserver);
+
+        const jqueryOffArgs = args => {
+            if (args[0] && typeof args[0] === 'object') return typeof args[1] === 'string' ? [args[0], args[1]] : [args[0]];
+            const selector = typeof args[1] === 'string' ? args[1] : undefined;
+            const handler = [...args].reverse().find(value => typeof value === 'function' || value === false);
+            return selector === undefined ? [args[0], handler].filter(value => value !== undefined) : [args[0], selector, handler].filter(value => value !== undefined);
+        };
+        const installJquery = () => {
+            const jq = window.jQuery || window.$;
+            if (jqueryReady || !jq?.fn?.on || !jq?.fn?.off) return false;
+            jqueryReady = true;
+            const on = jq.fn.on;
+            const one = jq.fn.one;
+            const off = jq.fn.off;
+            original.jqueryOff = off;
+            const add = (method, collection, args) => {
+                const owner = currentOwner();
+                skipNativeEvent += 1;
+                let result;
+                try { result = method.apply(collection, args); }
+                finally { skipNativeEvent -= 1; }
+                if (canTrack(owner)) {
+                    const item = { targets: collection.toArray(), args, offArgs: jqueryOffArgs(args), method, active: true, removed: false };
+                    bucket(owner).jquery.push(item);
+                    if (paused.has(owner)) { item.targets.forEach(target => off.apply(jq(target), item.offArgs)); item.active = false; }
+                }
+                return result;
+            };
+            jq.fn.on = function (...args) { return add(on, this, args); };
+            if (one) jq.fn.one = function (...args) { return add(one, this, args); };
+            jq.fn.off = function (...args) {
+                const owner = currentOwner();
+                if (canTrack(owner)) bucket(owner).jquery.forEach(item => {
+                    if (item.targets.some(target => this.toArray().includes(target))) { item.active = false; item.removed = true; }
+                });
+                skipNativeEvent += 1;
+                try { return off.apply(this, args); }
+                finally { skipNativeEvent -= 1; }
+            };
+            return true;
+        };
+
+        const installEventSource = () => {
+            const source = window.SillyTavern?.getContext?.().eventSource;
+            if (sourceReady || !source?.on || !source?.off) return false;
+            sourceReady = true;
+            const on = source.on.bind(source);
+            const off = source.off.bind(source);
+            const once = typeof source.once === 'function' ? source.once.bind(source) : null;
+            const removeListener = typeof source.removeListener === 'function' ? source.removeListener.bind(source) : off;
+            original.sourceOn = on;
+            original.sourceOff = off;
+            original.sourceOnce = once;
+            source.on = function (event, listener) {
+                const owner = skipSourceEvent ? '' : currentOwner();
+                const result = on(event, listener);
+                if (canTrack(owner) && listener) {
+                    const item = { event, listener, once: false, active: true, removed: false };
+                    bucket(owner).source.push(item);
+                    if (paused.has(owner)) { off(event, listener); item.active = false; }
+                }
+                return result;
+            };
+            const removeTrackedListener = (event, listener, method) => {
+                const owner = currentOwner();
+                if (canTrack(owner)) bucket(owner).source.forEach(item => {
+                    if (item.event === event && item.listener === listener) { item.active = false; item.removed = true; }
+                });
+                return method(event, listener);
+            };
+            source.off = function (event, listener) { return removeTrackedListener(event, listener, off); };
+            if (typeof source.removeListener === 'function') {
+                source.removeListener = function (event, listener) { return removeTrackedListener(event, listener, removeListener); };
+            }
+            if (once) source.once = function (event, listener) {
+                const owner = currentOwner();
+                if (!canTrack(owner) || !listener) return once(event, listener);
+                const item = { event, listener: null, once: true, active: true, removed: false };
+                item.listener = wrapCallback(owner, listener, () => {
+                    off(event, item.listener);
+                    item.active = false;
+                    item.removed = true;
+                });
+                skipSourceEvent += 1;
+                try { on(event, item.listener); }
+                finally { skipSourceEvent -= 1; }
+                bucket(owner).source.push(item);
+                if (paused.has(owner)) { off(event, item.listener); item.active = false; }
+                return source;
+            };
+            return true;
+        };
+
+        const pause = ownerValue => {
+            const owner = normalize(ownerValue);
+            paused.add(owner);
+            const store = resources.get(owner);
+            if (!store) return false;
+            store.events.forEach(item => { if (item.active && !item.removed) original.removeEvent.call(item.target, item.type, item.registered, item.options); item.active = false; });
+            store.jquery.forEach(item => { if (item.active && !item.removed && original.jqueryOff) item.targets.forEach(target => original.jqueryOff.apply((window.jQuery || window.$)(target), item.offArgs)); item.active = false; });
+            store.source.forEach(item => { if (item.active && !item.removed && original.sourceOff) original.sourceOff(item.event, item.listener); item.active = false; });
+            store.timers.forEach(item => { if (item.active && !item.removed) original[item.kind === 'setTimeout' ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; });
+            store.frames.forEach(item => { if (item.active && !item.removed) original.cancelFrame(item.handle); item.active = false; });
+            store.observers.forEach(item => { if (item.active && !item.removed) original[item.type]?.disconnect.call(item.instance); item.active = false; });
+            store.nodes.forEach(hideNode);
+            store.styles.forEach(disableStyle);
+            return true;
+        };
+        const resume = ownerValue => {
+            const owner = normalize(ownerValue);
+            paused.delete(owner);
+            const store = resources.get(owner);
+            if (!store) return false;
+            store.events.forEach(item => { if (!item.active && !item.removed) {
+                    if (typeof item.options === 'object' && item.options?.signal?.aborted) { item.removed = true; return; }
+                    original.addEvent.call(item.target, item.type, item.registered, item.options);
+                    item.active = true;
+                } });
+            store.jquery.forEach(item => { if (!item.active && !item.removed) { item.targets.forEach(target => item.method.apply((window.jQuery || window.$)(target), item.args)); item.active = true; } });
+            store.source.forEach(item => { if (!item.active && !item.removed && original.sourceOn) { original.sourceOn(item.event, item.listener); item.active = true; } });
+            store.timers.forEach(item => { if (!item.active && !item.removed) { item.handle = original[item.kind](item.callback, item.delay, ...item.args); item.active = true; } });
+            store.frames.forEach(item => { if (!item.active && !item.removed) { item.handle = original.requestFrame(item.callback); item.active = true; } });
+            store.observers.forEach(item => { if (!item.active && !item.removed) { item.targets.forEach(entry => original[item.type]?.observe.call(item.instance, entry.target, entry.options)); item.active = item.targets.length > 0; } });
+            store.nodes.forEach(showNode);
+            store.styles.forEach(enableStyle);
+            return true;
+        };
+        const dispose = (ownerValue, removeNodes = false) => {
+            const owner = normalize(ownerValue);
+            pause(owner);
+            if (removeNodes) {
+                resources.get(owner)?.nodes.forEach(node => node.remove());
+                resources.get(owner)?.styles.forEach(node => node.remove());
+            }
+            resources.delete(owner);
+            paused.delete(owner);
+        };
+
+        installJquery();
+        installEventSource();
+        const discoveryTimer = original.setInterval(() => {
+            installJquery();
+            installEventSource();
+            if (jqueryReady && sourceReady) original.clearInterval(discoveryTimer);
+        }, 500);
+        const runtime = {
+            version: 1,
+            pause,
+            resume,
+            dispose,
+            has: owner => resources.has(normalize(owner)),
+            isPaused: owner => paused.has(normalize(owner)),
+            runWithOwner: (owner, callback) => runOwned(owner, callback),
+            trackNode: (owner, node) => { if (canTrack(normalize(owner)) && node instanceof Element) bucket(owner).nodes.add(node); },
+            stats: owner => {
+                const store = resources.get(normalize(owner));
+                return store ? Object.fromEntries(Object.entries(store).map(([key, value]) => [key, value.size ?? value.length])) : null;
+            },
+        };
+        window[HOT_RUNTIME_KEY] = runtime;
+        return runtime;
+    }
+
+    const extensionHotRuntime = installExtensionHotRuntime();
     const FAQ_ITEMS = [{
         id: 'invalid-csrf-token',
         title: '1.15.0 以及更高版本酒馆出现 ForbiddenError: Invalid CSRF token',
@@ -41,6 +454,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.2',
+        version: 'v1.23.2',
+        date: '2026-08-23',
+        title: '第三方扩展真正无刷新热启停',
+        summary: '扩展无需自带热启停接口，也能在当前酒馆页面暂停和恢复。',
+        content: '**无刷新启停：** 扩展管理器会在第三方扩展加载时记录它创建的原生事件、jQuery 事件、酒馆事件订阅、定时任务、动画帧、页面观察器、样式和界面入口。禁用时统一暂停并隐藏，启用时原地恢复，整个过程不会刷新浏览器。\n\n**兼容普通扩展：** 插件不需要提供 `enable/disable` 或清理接口。单项启停、多选、检测结果页和白名单页都使用同一套运行时托管。首次启用本页尚未加载的扩展时，管理器会直接加载它的入口脚本。\n\n**字体管理器：** Ny 字体管理器继续使用专用适配，字体效果、聊天字体扫描和设置入口会随启停同步恢复。',
+    }, {
         id: 'v1.23.1',
         version: 'v1.23.1',
         date: '2026-08-23',
@@ -85,7 +505,7 @@
     }];
     const TUTORIAL_SECTIONS = [
         { id: 'getting-started', title: '一、开始使用与界面', icon: 'fa-compass', items: [{ title: '第一次打开扩展管理器', content: '1. 刷新 SillyTavern 网页，打开顶部的魔法棒菜单。\n2. 点击“扩展管理器”进入主界面。\n3. 顶部三个标签分别是“前端扩展”“后端管理”“安装扩展”。\n4. 标题下方会显示服务端存储是否连接；__未连接时，前端中文名、备注和分组仍会保存在当前浏览器。__' }, { title: '标题栏、主题和关闭按钮', content: '标题栏会显示扩展管理器版本号。右上角太阳或月亮按钮用于切换日间、夜间模式，并会记住选择；叉号用于关闭管理器。点击顶部标签可以随时切换前端、后端和安装设置页面。' }, { title: '收起面板、拖动悬浮球和调整大小', content: '点击右上角收起按钮后，管理器会变成悬浮球，不会中断正在进行的检测。拖动悬浮球可以改变位置，点击悬浮球会恢复完整面板。\n\n在“前端扩展”页上方拖动“悬浮球大小”滑杆，可在 25-56px 之间调整大小；位置和主题保存在浏览器，大小在管理后端连接时保存。' }] },
-        { id: 'frontend', title: '二、前端扩展管理', icon: 'fa-puzzle-piece', items: [{ title: '看懂前端扩展卡片', content: '每张卡片会显示扩展名称、安装类型、所属分组、启用状态、插件 ID、GitHub 作者、版本号、提交号、分支、备注和仓库入口。\n\n“当前用户”只属于当前酒馆账号，“全局”对全部账号可见，“内置”是 SillyTavern 自带扩展。开启隐私打码后，ID、作者和提交号会被模糊。' }, { title: '搜索、取消搜索、筛选、排序和重新读取', content: '在搜索框输入名称、仓库、分组或备注即可过滤列表；点击旁边的“取消搜索”立即恢复完整列表。分组下拉框只显示指定文件夹，排序下拉框可按首字母、安装/更新时间、启用状态、类型或检测状态排列。右侧刷新图标会重新读取 SillyTavern 当前安装的扩展。' }, { title: '检测和更新扩展管理器本体', content: '在“扩展管理器本体”一栏点击“检测”。==发现新版本后才会出现“更新”按钮==；点击更新会拉取新代码并热加载扩展管理器，入口不会消失，也不需要刷新整个网页。' }, { title: '单个扩展的检测、更新、启用和禁用', content: '点击卡片上的“检查”只检测这一项，并留在当前页面。**只有检测到新版本后才会出现“更新”**，避免~~未检测就直接更新~~。\n\n“启用/禁用”调用 SillyTavern 原生接口。支持标准生命周期、纯 CSS 或专用适配的扩展会直接热切换；没有清理接口的旧式扩展会自动刷新一次，确保入口、事件和常驻任务真正加载或停止。批量操作只会在整批完成后刷新一次。Ny 字体管理器已经专门适配，可恢复字体、样式、设置界面和聊天扫描。' }, { title: '如何卸载前端扩展', content: '扩展管理器目前不提供卸载按钮，避免误删插件。请打开 SillyTavern 原生扩展管理页面，找到目标第三方扩展并使用原生卸载功能。若原生页面无法卸载，请先关闭 SillyTavern 后端，确认目录后删除对应的 third-party 扩展文件夹，再重新启动并刷新网页。内置扩展不要手动删除。' }, { title: '编辑中文名、分组和备注', content: '点击“中文资料与分组”，填写中文名、分组或备注后保存。输入新的分组名称会自动形成文件夹；这些只是扩展管理器中的标记，不会移动、改名或修改原始插件目录。' }] },
+        { id: 'frontend', title: '二、前端扩展管理', icon: 'fa-puzzle-piece', items: [{ title: '看懂前端扩展卡片', content: '每张卡片会显示扩展名称、安装类型、所属分组、启用状态、插件 ID、GitHub 作者、版本号、提交号、分支、备注和仓库入口。\n\n“当前用户”只属于当前酒馆账号，“全局”对全部账号可见，“内置”是 SillyTavern 自带扩展。开启隐私打码后，ID、作者和提交号会被模糊。' }, { title: '搜索、取消搜索、筛选、排序和重新读取', content: '在搜索框输入名称、仓库、分组或备注即可过滤列表；点击旁边的“取消搜索”立即恢复完整列表。分组下拉框只显示指定文件夹，排序下拉框可按首字母、安装/更新时间、启用状态、类型或检测状态排列。右侧刷新图标会重新读取 SillyTavern 当前安装的扩展。' }, { title: '检测和更新扩展管理器本体', content: '在“扩展管理器本体”一栏点击“检测”。==发现新版本后才会出现“更新”按钮==；点击更新会拉取新代码并热加载扩展管理器，入口不会消失，也不需要刷新整个网页。' }, { title: '单个扩展的检测、更新、启用和禁用', content: '点击卡片上的“检查”只检测这一项，并留在当前页面。**只有检测到新版本后才会出现“更新”**，避免~~未检测就直接更新~~。\n\n“启用/禁用”会先保存酒馆状态，再由扩展管理器暂停或恢复目标扩展的事件、定时任务、观察器、样式和界面入口。第三方扩展不需要自带热启停接口，整个过程不会刷新浏览器。批量、检测结果页和白名单页使用相同逻辑；Ny 字体管理器另有专用字体与扫描适配。' }, { title: '如何卸载前端扩展', content: '扩展管理器目前不提供卸载按钮，避免误删插件。请打开 SillyTavern 原生扩展管理页面，找到目标第三方扩展并使用原生卸载功能。若原生页面无法卸载，请先关闭 SillyTavern 后端，确认目录后删除对应的 third-party 扩展文件夹，再重新启动并刷新网页。内置扩展不要手动删除。' }, { title: '编辑中文名、分组和备注', content: '点击“中文资料与分组”，填写中文名、分组或备注后保存。输入新的分组名称会自动形成文件夹；这些只是扩展管理器中的标记，不会移动、改名或修改原始插件目录。' }] },
         { id: 'detection', title: '三、检测、更新与结果页', icon: 'fa-magnifying-glass', items: [{ title: '检测全部、检测分组和检测选中', content: '**“检测更新”只会检查全部非白名单、非内置的前端扩展；**分组标题旁的放大镜只检查该文件夹；进入多选后可使用“检测选中”。后端和白名单页也提供相同的全部、分组和多选检测。\n\n单插件检测不会打开结果页，其他批量检测完成后都会进入本批检测结果页。' }, { title: '查看检测进度和手动取消', content: '检测期间按钮和卡片会显示旋转图标，前端与后端状态栏会显示“已完成/总数”。\n\n> **取消规则：** 点击顶部“取消检测”后，正在检测的项目会完成，==尚未开始的项目会停止==，不会伪造已完成数量。取消后保留已经得到的检测结果。' }, { title: '检测失败、重试和复制报错', content: '==检测失败的卡片会标红==并显示“查看报错”。展开后可以查看原始错误并一键复制诊断信息，复制内容不会包含仓库地址和插件 ID。\n\n列表上方的“重试失败”只重新检查失败项；弱网时也可以在网络恢复后再次检测。' }, { title: '看懂独立检测结果页', content: '批量检测完成后，结果页会直接罗列本批插件，不按原分组拆分。顺序为：检测失败的红色卡片、需要更新的绿色卡片、无需更新的插件，最后是未完成项。\n\n结果页支持搜索、取消搜索、重新检测、一键更新、多选、全选当前、清空、检测选中和更新选中；前端结果还支持启用或禁用。点击左上角返回原管理页面。' }, { title: '一键更新和顺序热更新规则', content: '**“更新全部”只更新本次已经检测并确认有新版本的插件；**“更新选中”也要求所选插件先完成检测。前端扩展会一个接一个更新并尝试热加载，不刷新整个网页。更新完成后会重新读取扩展状态、版本和提交信息。' }, { title: '检测后的临时排序和颜色', content: '除单插件检测外，检测结束后主列表会在每个分组内临时按“失败、可更新、最新、未检测”排序。失败卡片标红，可更新卡片标绿。手动更改排序方式后会退出临时排序。' }] },
         { id: 'batch-groups', title: '四、多选与分组操作', icon: 'fa-list-check', items: [{ title: '如何使用多选模式', content: '点击列表右侧“多选”，再点击卡片左侧选择框。只选一个插件也可以执行多选操作。“全选当前”只选择搜索和筛选后当前可见的项目，“清空”取消全部选择，再次点击“退出多选”返回普通模式。' }, { title: '前端和后端支持哪些批量操作', content: '前端多选支持：分组、加入白名单、检测选中、更新选中、启用选中、禁用选中。\n\n后端多选支持：分组、加入白名单、检测选中和更新选中。所有更新都会先核对检测结果，再逐项执行。白名单页和检测结果页也有对应的多选操作。' }, { title: '创建、展开和管理文件夹分组', content: '在多选工具栏选择已有分组，或选择“新建分组”输入名称，即可把插件标记到文件夹。文件夹默认收起，点击左侧箭头展开或折叠。\n\n文件夹右侧按钮依次可**检测分组、更新分组、整组加入白名单、添加新插件、重命名和解散**。解散只清除分组标记，不会删除插件；分组更新只处理该组内已检测到更新的项目。' }, { title: '内置与未分组文件夹', content: 'SillyTavern 自带的前端扩展会自动归入“内置”文件夹，不需要手动选择。没有自定义分组的项目显示在“未分组”。“内置”和“未分组”是保留名称，不能当作普通自定义分组重命名。\n\n> **内置扩展不参与任何检测或更新**，但仍保留查看仓库、资料和备注等基础按钮。' }] },
         { id: 'backend', title: '五、后端插件管理', icon: 'fa-server', items: [{ title: '后端管理需要什么条件', content: '“后端管理”页面最上方单独显示扩展管理器后端的检测与更新；下方列表读取 SillyTavern/plugins 中安装的其他后端插件。要使用读取、分组、白名单、检测和更新能力，必须先安装扩展管理器后端，并在 config.yaml 中启用服务端插件，然后手动重启 SillyTavern。' }, { title: '读取和查看后端插件信息', content: '点击“读取插件”刷新列表。后端页支持搜索、取消搜索、分组筛选、按名称或更新状态排序。卡片会显示插件 ID、GitHub 作者、版本号、提交号、分支、备注和是否支持自动更新，便于核对实际安装代码。' }, { title: '后端检测、更新和重启规则', content: '页面顶部可单独检测和更新扩展管理器后端；普通“检测全部”和“更新全部”只处理下方的其他后端插件。其他插件可以检测全部、单个、分组或选中项，只有检测到更新的独立 Git 仓库才允许更新，管理器会依次执行安全的 git pull --ff-only。\n\n> **后端更新不会自动停止或重启 SillyTavern。** 全部完成后==必须由用户手动重启==，更新后的后端代码才会生效。' }, { title: '后端中文资料、分组和多选', content: '管理后端连接后，可为后端插件保存中文名、备注和文件夹分组。文件夹支持展开、检测、更新、添加、重命名和解散；多选支持分组、加入白名单、检测和顺序更新，操作方式与前端页一致。后端插件不提供前端扩展的启用/禁用按钮。' }] },
@@ -1686,7 +2106,8 @@
     function normalizedMenuText(value) {
         return String(value || "").normalize("NFKC").toLowerCase().replace(/[\s\-_/.:·()（）]+/g, "");
     }
-    function cleanupExtensionMenuEntries(extension) {
+    function rememberExtensionUiEntries(extension) {
+        const folder = folderOf(extension);
         const rawTokens = [folderOf(extension), displayPath(extension), extension.displayName, extension.zhName, extension.manifest?.display_name].map(value => String(value || "").trim()).filter(Boolean);
         const labels = rawTokens.map(normalizedMenuText).concat(rawTokens.map(value => normalizedMenuText(value.replace(/^(sillytavern|st)[-_ ]*/i, "")))).filter(value => /[^\x00-\x7F]/.test(value) ? value.length >= 2 : value.length >= 4);
         $("#extensionsMenu").find(".list-group-item, .menu_button, [role=menuitem], button").each(function () {
@@ -1697,7 +2118,13 @@
             const haystack = normalizedMenuText([this.textContent || "", ...attributes].join(" "));
             if (!labels.some(label => haystack.includes(label))) return;
             const $entry = $candidate.closest(".list-group-item, [role=menuitem]").first();
-            ($entry.length ? $entry : $candidate).remove();
+            extensionHotRuntime.trackNode(folder, ($entry.length ? $entry : $candidate)[0]);
+        });
+        $("#extensions_settings").find("[id], [data-extension], [data-name]").each(function () {
+            if ($(this).closest(`#${OVERLAY_ID}`).length) return;
+            const attributes = ["id", "class", "data-name", "data-extension", "aria-label", "title"].map(attribute => this.getAttribute?.(attribute) || "");
+            const haystack = normalizedMenuText(attributes.join(" "));
+            if (labels.some(label => haystack.includes(label))) extensionHotRuntime.trackNode(folder, this);
         });
     }
 
@@ -1793,29 +2220,13 @@
         return true;
     }
 
-    async function hotReload(extension, enabled = true) {
+    async function loadExtensionEntry(extension, cacheKey = 'em_hot_start') {
         const script = currentScriptFor(extension);
-        const folder = folderOf(extension);
-        const cleanupName = `__${folder.replace(/[^a-z0-9_$]/gi, '_')}HotCleanup`;
-        if (typeof window[cleanupName] === 'function') { try { window[cleanupName](); } catch (error) {} }
-        if (await toggleNyFontManagerHot(extension, enabled)) {
-            if (!enabled) {
-                extensionAssetElements(extension).forEach(element => element.remove());
-                cleanupExtensionMenuEntries(extension);
-            }
-            return true;
-        }
-        if (!enabled) {
-            extensionAssetElements(extension).forEach(element => element.remove());
-            cleanupExtensionMenuEntries(extension);
-            if (script) script.remove();
-            return true;
-        }
-        await ensureExtensionStyle(extension);
+        const js = String(extension.manifest?.js || '').trim();
+        if (!js) return true;
         const source = script?.src || `/scripts/extensions/${displayPath(extension)}/${extension.manifest?.js || 'index.js'}`;
         const url = new URL(source, document.baseURI || location.href);
-        url.searchParams.set('em_update', Date.now());
-        if (script) script.remove();
+        url.searchParams.set(cacheKey, Date.now());
         await new Promise((resolve, reject) => {
             const next = document.createElement('script');
             next.type = script?.type || 'module';
@@ -1823,8 +2234,28 @@
             next.src = url.href;
             next.onload = resolve;
             next.onerror = () => reject(new Error('重新加载扩展脚本失败'));
-            document.body.appendChild(next);
+            extensionHotRuntime.runWithOwner(folderOf(extension), () => document.body.appendChild(next));
         });
+        return true;
+    }
+
+    async function hotReload(extension) {
+        const folder = folderOf(extension);
+        const cleanupName = extensionCleanupName(extension);
+        if (typeof window[cleanupName] === 'function') {
+            try { await window[cleanupName](); }
+            catch (error) { console.warn('[Extension Manager] Extension cleanup before update failed.', folder, error); }
+        }
+        if (isNyFontManager(extension)) {
+            await toggleNyFontManagerHot(extension, false);
+            await toggleNyFontManagerHot(extension, true);
+            return true;
+        }
+        rememberExtensionUiEntries(extension);
+        extensionHotRuntime.dispose(folder, true);
+        extensionAssetElements(extension).forEach(element => element.remove());
+        await ensureExtensionStyle(extension);
+        await loadExtensionEntry(extension, 'em_update');
         return true;
     }
 
@@ -1838,11 +2269,8 @@
 
     function extensionHotToggleMode(extension) {
         if (isNyFontManager(extension)) return 'ny-font-manager';
-        const hooks = extension.manifest?.hooks;
-        if (hooks && typeof hooks.enable === 'string' && typeof hooks.disable === 'string') return 'lifecycle-hooks';
         if (!String(extension.manifest?.js || '').trim() && String(extension.manifest?.css || '').trim()) return 'css-only';
-        if (typeof window[extensionCleanupName(extension)] === 'function') return 'cleanup-hook';
-        return 'reload';
+        return 'runtime-managed';
     }
 
     async function setExtensionStylesEnabled(extension, enabled) {
@@ -1853,31 +2281,34 @@
     }
 
     async function toggleExtensionHot(extension, enabled) {
-        const requestedMode = extensionHotToggleMode(extension);
-        let appliedMode = requestedMode;
+        const mode = extensionHotToggleMode(extension);
+        const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
-        try {
-            if (requestedMode === 'ny-font-manager' || requestedMode === 'cleanup-hook') {
-                await hotReload(extension, enabled);
-            } else if (requestedMode === 'lifecycle-hooks' || requestedMode === 'css-only') {
-                await setExtensionStylesEnabled(extension, enabled);
+
+        if (isNyFontManager(extension)) {
+            if (!enabled) {
+                rememberExtensionUiEntries(extension);
+                extensionHotRuntime.pause(folder);
             }
-        } catch (error) {
-            appliedMode = 'reload';
-            console.warn('[Extension Manager] Hot toggle failed; falling back to a page reload.', folderOf(extension), error);
+            await toggleNyFontManagerHot(extension, enabled);
+            await setExtensionStylesEnabled(extension, enabled);
+            if (enabled) extensionHotRuntime.resume(folder);
+        } else if (!enabled) {
+            rememberExtensionUiEntries(extension);
+            extensionHotRuntime.pause(folder);
+            await setExtensionStylesEnabled(extension, false);
+        } else {
+            await setExtensionStylesEnabled(extension, true);
+            const resumed = extensionHotRuntime.resume(folder);
+            if (!resumed && !currentScriptFor(extension)) await loadExtensionEntry(extension);
         }
+
         await nextPaint();
         const api = await getExtensionApi();
         const current = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
         if (!current || current.enabled !== enabled) throw new Error('扩展状态复核失败');
         extension.enabled = current.enabled;
-        return { ...current, hot: appliedMode !== 'reload', reloadRequired: appliedMode === 'reload', mode: appliedMode };
-    }
-
-    function scheduleExtensionStateReload() {
-        if (window.__extensionManagerStateReloadPending) return;
-        window.__extensionManagerStateReloadPending = true;
-        window.setTimeout(() => window.location.reload(), 350);
+        return { ...current, hot: true, mode, resources: extensionHotRuntime.stats(folder) };
     }
 
     async function updateOne(extension, $popup, options = {}) {
@@ -1962,21 +2393,18 @@
         renderBatchSelection($popup);
         const $status = $popup.find('.em-batch-update-status');
         let completed = 0;
-        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 const extension = targets[index];
                 $status.text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${extension.displayName}`);
                 try {
-                    const result = await toggleExtensionHot(extension, enabled);
-                    reloadRequired ||= result.reloadRequired;
+                    await toggleExtensionHot(extension, enabled);
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${extension.displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}${reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'}`);
-            if (reloadRequired) scheduleExtensionStateReload();
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，已在当前页面热切换`);
         } finally {
             state.batchToggling = false;
             renderList($popup);
@@ -2508,7 +2936,6 @@
         detectionResults.action = enabled ? 'enabling' : 'disabling';
         renderDetectionResults($popup);
         let completed = 0;
-        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 const extension = targets[index];
@@ -2516,14 +2943,12 @@
                 state.togglingExtensions.add(folderOf(extension));
                 renderDetectionResults($popup);
                 try {
-                    const result = await toggleExtensionHot(extension, enabled);
-                    reloadRequired ||= result.reloadRequired;
+                    await toggleExtensionHot(extension, enabled);
                     completed += 1;
                 } catch (error) { if (window.toastr) toastr.error(extension.displayName + ' 处理失败：' + (error.message || error)); }
                 finally { state.togglingExtensions.delete(folderOf(extension)); }
             }
-            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length + (reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'));
-            if (reloadRequired) scheduleExtensionStateReload();
+            if (window.toastr) toastr.success('批量' + (enabled ? '启用' : '禁用') + '完成：' + completed + ' / ' + targets.length + '，已在当前页面热切换');
         } finally {
             state.batchToggling = false;
             detectionResults.action = '';
@@ -2894,20 +3319,17 @@
         state.batchToggling = true;
         renderWhitelistPanel($popup);
         let completed = 0;
-        let reloadRequired = false;
         try {
             for (let index = 0; index < targets.length; index++) {
                 $popup.find('.em-whitelist-batch-status').text(`正在${enabled ? '启用' : '禁用'} ${index + 1} / ${targets.length}：${targets[index].displayName}`);
                 try {
-                    const result = await toggleExtensionHot(targets[index], enabled);
-                    reloadRequired ||= result.reloadRequired;
+                    await toggleExtensionHot(targets[index], enabled);
                     completed += 1;
                 } catch (error) {
                     if (window.toastr) toastr.error(`${targets[index].displayName} ${enabled ? '启用' : '禁用'}失败：${error.message || error}`);
                 }
             }
-            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}${reloadRequired ? '，旧式扩展需要刷新，正在刷新页面' : '，已热切换'}`);
-            if (reloadRequired) scheduleExtensionStateReload();
+            if (window.toastr) toastr.success(`批量${enabled ? '启用' : '禁用'}完成：${completed} / ${targets.length}，已在当前页面热切换`);
         } finally {
             state.batchToggling = false;
             renderWhitelistPanel($popup);
@@ -4872,11 +5294,8 @@
             renderList($popup);
             try {
                 const enabled = $(this).attr("data-enable") === "true";
-                const result = await toggleExtensionHot(extension, enabled);
-                if (result.reloadRequired) {
-                    if (window.toastr) toastr.info(extension.displayName + ' 状态已保存；该扩展未提供热启停接口，正在刷新页面以完整' + (enabled ? '加载' : '停止'));
-                    scheduleExtensionStateReload();
-                } else if (window.toastr) toastr.success(extension.displayName + ' 已' + (enabled ? '启用' : '禁用') + '并热切换');
+                await toggleExtensionHot(extension, enabled);
+                if (window.toastr) toastr.success(extension.displayName + ' 已' + (enabled ? '启用' : '禁用') + '并在当前页面生效');
             } catch (error) {
                 if (window.toastr) toastr.error(`切换失败：${error.message || error}`);
             } finally {
