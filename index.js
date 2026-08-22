@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.2';
+    const SCRIPT_VERSION = '1.23.3';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -34,7 +34,20 @@
     const NETWORK_RETRY_DELAYS = [1200, 3200];
 
     function installExtensionHotRuntime() {
-        if (window[HOT_RUNTIME_KEY]?.version >= 1) return window[HOT_RUNTIME_KEY];
+        const existingRuntime = window[HOT_RUNTIME_KEY];
+        if (existingRuntime?.version >= 2) return existingRuntime;
+        if (existingRuntime?.version === 1) {
+            ['pause', 'resume'].forEach(method => {
+                const previous = typeof existingRuntime[method] === 'function' ? existingRuntime[method].bind(existingRuntime) : null;
+                if (!previous) return;
+                existingRuntime[method] = (...args) => {
+                    try { return previous(...args); }
+                    catch (error) { console.warn('[Extension Manager] Recovered an older hot runtime ' + method + ' failure.', error); return true; }
+                };
+            });
+            existingRuntime.version = 2;
+            return existingRuntime;
+        }
 
         const pathPattern = /\/scripts\/extensions\/(?:third-party\/)?([^/?#]+)\//i;
         const managerFolder = (() => {
@@ -373,19 +386,26 @@
             return true;
         };
 
+        const ignoreToggleError = (owner, phase, kind, item, error) => {
+            if (item && typeof item === 'object' && 'removed' in item) {
+                item.active = false;
+                item.removed = true;
+            }
+            console.warn('[Extension Manager] Ignored stale ' + kind + ' while ' + phase + ' ' + owner + '.', error);
+        };
         const pause = ownerValue => {
             const owner = normalize(ownerValue);
             paused.add(owner);
             const store = resources.get(owner);
             if (!store) return false;
-            store.events.forEach(item => { if (item.active && !item.removed) original.removeEvent.call(item.target, item.type, item.registered, item.options); item.active = false; });
-            store.jquery.forEach(item => { if (item.active && !item.removed && original.jqueryOff) item.targets.forEach(target => original.jqueryOff.apply((window.jQuery || window.$)(target), item.offArgs)); item.active = false; });
-            store.source.forEach(item => { if (item.active && !item.removed && original.sourceOff) original.sourceOff(item.event, item.listener); item.active = false; });
-            store.timers.forEach(item => { if (item.active && !item.removed) original[item.kind === 'setTimeout' ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; });
-            store.frames.forEach(item => { if (item.active && !item.removed) original.cancelFrame(item.handle); item.active = false; });
-            store.observers.forEach(item => { if (item.active && !item.removed) original[item.type]?.disconnect.call(item.instance); item.active = false; });
-            store.nodes.forEach(hideNode);
-            store.styles.forEach(disableStyle);
+            store.events.forEach(item => { try { if (item.active && !item.removed) original.removeEvent.call(item.target, item.type, item.registered, item.options); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'event listener', item, error); } });
+            store.jquery.forEach(item => { try { if (item.active && !item.removed && original.jqueryOff) item.targets.forEach(target => original.jqueryOff.apply((window.jQuery || window.$)(target), item.offArgs)); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'jQuery listener', item, error); } });
+            store.source.forEach(item => { try { if (item.active && !item.removed && original.sourceOff) original.sourceOff(item.event, item.listener); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'SillyTavern event listener', item, error); } });
+            store.timers.forEach(item => { try { if (item.active && !item.removed) original[item.kind === 'setTimeout' ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'timer', item, error); } });
+            store.frames.forEach(item => { try { if (item.active && !item.removed) original.cancelFrame(item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'animation frame', item, error); } });
+            store.observers.forEach(item => { try { if (item.active && !item.removed) original[item.type]?.disconnect.call(item.instance); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'observer', item, error); } });
+            store.nodes.forEach(node => { try { hideNode(node); } catch (error) { ignoreToggleError(owner, 'pausing', 'interface node', node, error); } });
+            store.styles.forEach(node => { try { disableStyle(node); } catch (error) { ignoreToggleError(owner, 'pausing', 'style', node, error); } });
             return true;
         };
         const resume = ownerValue => {
@@ -393,18 +413,14 @@
             paused.delete(owner);
             const store = resources.get(owner);
             if (!store) return false;
-            store.events.forEach(item => { if (!item.active && !item.removed) {
-                    if (typeof item.options === 'object' && item.options?.signal?.aborted) { item.removed = true; return; }
-                    original.addEvent.call(item.target, item.type, item.registered, item.options);
-                    item.active = true;
-                } });
-            store.jquery.forEach(item => { if (!item.active && !item.removed) { item.targets.forEach(target => item.method.apply((window.jQuery || window.$)(target), item.args)); item.active = true; } });
-            store.source.forEach(item => { if (!item.active && !item.removed && original.sourceOn) { original.sourceOn(item.event, item.listener); item.active = true; } });
-            store.timers.forEach(item => { if (!item.active && !item.removed) { item.handle = original[item.kind](item.callback, item.delay, ...item.args); item.active = true; } });
-            store.frames.forEach(item => { if (!item.active && !item.removed) { item.handle = original.requestFrame(item.callback); item.active = true; } });
-            store.observers.forEach(item => { if (!item.active && !item.removed) { item.targets.forEach(entry => original[item.type]?.observe.call(item.instance, entry.target, entry.options)); item.active = item.targets.length > 0; } });
-            store.nodes.forEach(showNode);
-            store.styles.forEach(enableStyle);
+            store.events.forEach(item => { try { if (!item.active && !item.removed) { if (typeof item.options === 'object' && item.options?.signal?.aborted) { item.removed = true; return; } original.addEvent.call(item.target, item.type, item.registered, item.options); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'event listener', item, error); } });
+            store.jquery.forEach(item => { try { if (!item.active && !item.removed) { item.targets.forEach(target => item.method.apply((window.jQuery || window.$)(target), item.args)); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'jQuery listener', item, error); } });
+            store.source.forEach(item => { try { if (!item.active && !item.removed && original.sourceOn) { original.sourceOn(item.event, item.listener); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'SillyTavern event listener', item, error); } });
+            store.timers.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original[item.kind](item.callback, item.delay, ...item.args); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'timer', item, error); } });
+            store.frames.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original.requestFrame(item.callback); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'animation frame', item, error); } });
+            store.observers.forEach(item => { try { if (!item.active && !item.removed) { item.targets.forEach(entry => original[item.type]?.observe.call(item.instance, entry.target, entry.options)); item.active = item.targets.length > 0; } } catch (error) { ignoreToggleError(owner, 'resuming', 'observer', item, error); } });
+            store.nodes.forEach(node => { try { showNode(node); } catch (error) { ignoreToggleError(owner, 'resuming', 'interface node', node, error); } });
+            store.styles.forEach(node => { try { enableStyle(node); } catch (error) { ignoreToggleError(owner, 'resuming', 'style', node, error); } });
             return true;
         };
         const dispose = (ownerValue, removeNodes = false) => {
@@ -426,7 +442,7 @@
             if (jqueryReady && sourceReady) original.clearInterval(discoveryTimer);
         }, 500);
         const runtime = {
-            version: 1,
+            version: 2,
             pause,
             resume,
             dispose,
@@ -454,6 +470,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.3',
+        version: 'v1.23.3',
+        date: '2026-08-23',
+        title: '修复部分插件禁用时报 Illegal invocation',
+        summary: '失效的浏览器对象不再中断热禁用，插件入口和样式会继续正常隐藏。',
+        content: '**异常隔离：** 部分插件会在 iframe、临时窗口或已经销毁的节点上注册事件和观察器。过去清理这些失效对象时，浏览器可能抛出 Illegal invocation，导致后面的入口隐藏没有执行。现在每一项资源会独立处理，失效项只记录警告，不会中断其他事件、定时器、样式和入口的禁用或恢复。\n\n**入口兜底：** 插件入口显隐已从资源清理流程中独立出来，即使某个第三方对象无法调用，入口和主样式仍会按启用状态同步变化。\n\n**无需刷新：** 从 v1.23.2 热更新时会在线兼容已有运行时，修复生效不需要刷新浏览器。',
+    }, {
         id: 'v1.23.2',
         version: 'v1.23.2',
         date: '2026-08-23',
@@ -2106,8 +2129,10 @@
     function normalizedMenuText(value) {
         return String(value || "").normalize("NFKC").toLowerCase().replace(/[\s\-_/.:·()（）]+/g, "");
     }
+
     function rememberExtensionUiEntries(extension) {
         const folder = folderOf(extension);
+        const entries = new Set();
         const rawTokens = [folderOf(extension), displayPath(extension), extension.displayName, extension.zhName, extension.manifest?.display_name].map(value => String(value || "").trim()).filter(Boolean);
         const labels = rawTokens.map(normalizedMenuText).concat(rawTokens.map(value => normalizedMenuText(value.replace(/^(sillytavern|st)[-_ ]*/i, "")))).filter(value => /[^\x00-\x7F]/.test(value) ? value.length >= 2 : value.length >= 4);
         $("#extensionsMenu").find(".list-group-item, .menu_button, [role=menuitem], button").each(function () {
@@ -2118,16 +2143,39 @@
             const haystack = normalizedMenuText([this.textContent || "", ...attributes].join(" "));
             if (!labels.some(label => haystack.includes(label))) return;
             const $entry = $candidate.closest(".list-group-item, [role=menuitem]").first();
-            extensionHotRuntime.trackNode(folder, ($entry.length ? $entry : $candidate)[0]);
+            const entry = ($entry.length ? $entry : $candidate)[0];
+            entries.add(entry);
+            extensionHotRuntime.trackNode(folder, entry);
         });
         $("#extensions_settings").find("[id], [data-extension], [data-name]").each(function () {
             if ($(this).closest(`#${OVERLAY_ID}`).length) return;
             const attributes = ["id", "class", "data-name", "data-extension", "aria-label", "title"].map(attribute => this.getAttribute?.(attribute) || "");
             const haystack = normalizedMenuText(attributes.join(" "));
-            if (labels.some(label => haystack.includes(label))) extensionHotRuntime.trackNode(folder, this);
+            if (!labels.some(label => haystack.includes(label))) return;
+            entries.add(this);
+            extensionHotRuntime.trackNode(folder, this);
         });
+        return entries;
     }
 
+    function setExtensionUiEntriesEnabled(extension, enabled) {
+        rememberExtensionUiEntries(extension).forEach(node => {
+            if (!(node instanceof Element)) return;
+            if (!enabled) {
+                if (node.dataset.emHotHidden === '1') return;
+                node.dataset.emHotHidden = '1';
+                node.dataset.emHotDisplay = node.style.display || '';
+                node.style.setProperty('display', 'none', 'important');
+                return;
+            }
+            if (node.dataset.emHotHidden !== '1') return;
+            const display = node.dataset.emHotDisplay || '';
+            delete node.dataset.emHotHidden;
+            delete node.dataset.emHotDisplay;
+            node.style.removeProperty('display');
+            if (display) node.style.display = display;
+        });
+    }
 
     function currentScriptFor(extension) {
         return extensionScriptElements(extension)[0] || null;
@@ -2287,20 +2335,24 @@
 
         if (isNyFontManager(extension)) {
             if (!enabled) {
-                rememberExtensionUiEntries(extension);
+                setExtensionUiEntriesEnabled(extension, false);
                 extensionHotRuntime.pause(folder);
             }
             await toggleNyFontManagerHot(extension, enabled);
             await setExtensionStylesEnabled(extension, enabled);
-            if (enabled) extensionHotRuntime.resume(folder);
+            if (enabled) {
+                extensionHotRuntime.resume(folder);
+                setExtensionUiEntriesEnabled(extension, true);
+            }
         } else if (!enabled) {
-            rememberExtensionUiEntries(extension);
+            setExtensionUiEntriesEnabled(extension, false);
             extensionHotRuntime.pause(folder);
             await setExtensionStylesEnabled(extension, false);
         } else {
             await setExtensionStylesEnabled(extension, true);
             const resumed = extensionHotRuntime.resume(folder);
             if (!resumed && !currentScriptFor(extension)) await loadExtensionEntry(extension);
+            setExtensionUiEntriesEnabled(extension, true);
         }
 
         await nextPaint();
