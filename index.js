@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.5';
+    const SCRIPT_VERSION = '1.23.6';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -470,6 +470,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.6',
+        version: 'v1.23.6',
+        date: '2026-08-23',
+        title: '加快前端扩展列表读取',
+        summary: '打开管理器时优先显示前端列表，不再为每个扩展重复强制读取 manifest。',
+        content: '**读取提速：** 前端列表现在优先复用 SillyTavern 已经加载到内存的扩展 manifest。兼容旧版酒馆时才会补读 manifest 文件，并允许浏览器复用已有缓存，减少大量重复请求和无效路径尝试。\n\n**并行加载：** 前端扩展列表与管理后端连接、中文标注和分组资料改为同时读取。前端列表准备好后会立即显示，后端资料稍后返回时自动补齐，不再因为后端响应慢一直卡在“读取插件”。\n\n**更新准确性：** 插件更新完成后仍会强制读取最新 manifest，因此提速不会导致版本号或插件资料停留在更新前。',
+    }, {
         id: 'v1.23.5',
         version: 'v1.23.5',
         date: '2026-08-23',
@@ -923,9 +930,10 @@
         return state.settings;
     }
 
-    async function fetchManifest(extension) {
+    async function fetchManifest(extension, options = {}) {
         const path = displayPath(extension);
         const folder = folderOf(extension);
+        const fresh = options.fresh === true;
         const candidates = Array.from(new Set([
             `/scripts/extensions/${path}/manifest.json`,
             `/scripts/extensions/${folder}/manifest.json`,
@@ -933,11 +941,21 @@
         ]));
         for (const url of candidates) {
             try {
-                const response = await fetch(`${url}?em=${Date.now()}`, { cache: 'no-store' });
+                const response = await fetch(fresh ? `${url}?em=${Date.now()}` : url, { cache: fresh ? 'no-store' : 'default' });
                 if (response.ok) return await response.json();
             } catch (error) { /* Try the next native path. */ }
         }
         return {};
+    }
+
+    function loadedManifest(extensionApi, extension) {
+        if (typeof extensionApi?.getExtensionManifest !== 'function') return null;
+        try {
+            const manifest = extensionApi.getExtensionManifest(displayPath(extension)) || extensionApi.getExtensionManifest(folderOf(extension));
+            return manifest && typeof manifest === 'object' ? manifest : null;
+        } catch (error) {
+            return null;
+        }
     }
 
     function chineseValue(manifest, keys) {
@@ -955,24 +973,30 @@
         return '';
     }
 
-    async function discover() {
+    function applyFrontendMetadata(extension, meta = state.meta) {
+        const folder = folderOf(extension);
+        const serverMeta = meta[folder] && typeof meta[folder] === 'object' ? meta[folder] : {};
+        extension.zhName = serverMeta.name || chineseValue(extension.manifest, ['display_name_zh', 'displayNameZh', 'zh_name', 'name_zh']) || String(extension.manifest.display_name_zh || '').trim();
+        extension.note = serverMeta.note || chineseValue(extension.manifest, ['description_zh', 'descriptionZh', 'zh_description', 'note_zh', 'remarks_zh']);
+        extension.category = serverMeta.category || '';
+        extension.displayName = extension.zhName || extension.manifest.display_name || folder || extension.name;
+        extension.description = extension.note || extension.manifest.description || '暂无备注';
+        extension.version = extension.manifest.version || '';
+        return extension;
+    }
+
+    async function discover(options = {}) {
         const entries = await request('/api/extensions/discover', { method: 'GET' });
         const list = Array.isArray(entries) ? entries : [];
         const meta = state.meta;
+        const freshManifests = options.freshManifests === true;
         let extensionApi = null;
         try { extensionApi = await getExtensionApi(); } catch (error) {}
         const enriched = await Promise.all(list.map(async entry => {
             const extension = typeof entry === 'string' ? { name: entry } : { ...(entry || {}) };
             extension.name = String(extension.name || extension.folderName || extension.id || '').trim();
-            extension.manifest = await fetchManifest(extension);
-            const folder = folderOf(extension);
-            const serverMeta = meta[folder] && typeof meta[folder] === 'object' ? meta[folder] : {};
-            extension.zhName = serverMeta.name || chineseValue(extension.manifest, ['display_name_zh', 'displayNameZh', 'zh_name', 'name_zh']) || String(extension.manifest.display_name_zh || '').trim();
-            extension.note = serverMeta.note || chineseValue(extension.manifest, ['description_zh', 'descriptionZh', 'zh_description', 'note_zh', 'remarks_zh']);
-            extension.category = serverMeta.category || '';
-            extension.displayName = extension.zhName || extension.manifest.display_name || folder || extension.name;
-            extension.description = extension.note || extension.manifest.description || '暂无备注';
-            extension.version = extension.manifest.version || '';
+            extension.manifest = (!freshManifests && loadedManifest(extensionApi, extension)) || await fetchManifest(extension, { fresh: freshManifests });
+            applyFrontendMetadata(extension, meta);
             extension.enabled = extensionApi?.findExtension?.(extension.name)?.enabled ?? true;
             return extension;
         }));
@@ -2473,7 +2497,7 @@
                 const isSelf = folder.toLowerCase() === getInstalledExtensionName().toLowerCase();
                 if (isSelf) await hotReloadSelf();
                 else if (extension.enabled) await hotReload(extension);
-                await discover();
+                await discover({ freshManifests: true });
                 const refreshedExtension = state.extensions.find(item => folderOf(item) === folder) || extension;
                 refreshedExtension.updatedAt = Date.now();
                 await checkOne(refreshedExtension, undefined, { allowWhitelisted: options.allowWhitelisted === true });
@@ -3690,16 +3714,25 @@
     }
 
     async function loadExtensions($popup) {
-        $popup.find('#em-list').html('<div class="em-empty"><i class="fa-solid fa-spinner fa-spin"></i><span>正在连接酒馆扩展接口</span></div>');
+        $popup.find('#em-list').html('<div class="em-empty"><i class="fa-solid fa-spinner fa-spin"></i><span>正在读取酒馆前端扩展</span></div>');
+        if (!state.backend.available) state.meta = readLocalFrontendMeta();
+        state.settings = writeLocalSettings(normalizeSettings({ ...state.settings, ...readLocalSettings() }));
+        applyFloatingBallSize($popup);
+        const serverMetaPromise = loadServerMeta();
         try {
-            await loadServerMeta();
-            renderBackendState($popup);
-            applyFloatingBallSize($popup);
             await discover();
             renderList($popup);
         } catch (error) {
             $popup.find('#em-list').html(`<div class="em-empty em-error"><i class="fa-solid fa-triangle-exclamation"></i><span>读取失败：${escapeHtml(error.message || error)}</span></div>`);
         }
+        void serverMetaPromise.then(() => {
+            if (!$popup.closest('body').length) return;
+            state.extensions.forEach(extension => applyFrontendMetadata(extension));
+            renderBackendState($popup);
+            applyFloatingBallSize($popup);
+            renderList($popup);
+            if ($popup.find('[data-panel=whitelist]').hasClass('active')) renderWhitelistPanel($popup);
+        });
     }
 
     function injectStyle() {
