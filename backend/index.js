@@ -527,6 +527,28 @@ async function init(router) {
             sendError(res, status, error.message, error.code || 'plugin_update_failed');
         }
     });
+    router.delete("/plugins/:pluginId", async (req, res) => {
+        if (!isAdminRequest(req)) return sendError(res, 403, "只有酒馆管理员可以卸载服务端插件", "admin_required");
+        const pluginId = String(req.params?.pluginId || "").trim();
+        if (pluginId === info.id) return sendError(res, 409, "不能卸载扩展管理器后端，以免出现不可逆错误", "manager_protected");
+        try {
+            const target = await resolveServerPlugin(pluginId);
+            await enqueueUpdate(async () => { await fsp.rm(target.directory, { recursive: true, force: false }); });
+            let cleanupWarning = "";
+            try {
+                const data = await readData(req);
+                const next = { ...data, backendPlugins: { ...data.backendPlugins }, whitelist: { ...data.whitelist, backend: data.whitelist.backend.filter(id => id !== pluginId) } };
+                delete next.backendPlugins[pluginId];
+                await enqueueWrite(() => writeData(req, next));
+            } catch (error) {
+                cleanupWarning = `插件目录已删除，但资料记录清理失败：${error.message || error}`;
+            }
+            res.json({ ok: true, pluginId, removed: true, restartRequired: true, cleanupWarning, message: cleanupWarning ? `后端插件已卸载；${cleanupWarning}。请手动重启 SillyTavern` : "后端插件已卸载，请手动重启 SillyTavern" });
+        } catch (error) {
+            const status = error.code === "invalid_plugin_id" ? 400 : (error.code === "plugin_not_found" ? 404 : 500);
+            sendError(res, status, error.message, error.code || "plugin_uninstall_failed");
+        }
+    });
 
     router.get('/data', async (req, res) => {
         try {
