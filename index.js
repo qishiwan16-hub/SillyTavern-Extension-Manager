@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.16';
+    const SCRIPT_VERSION = '1.23.17';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,8 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.17', version: 'v1.23.17', date: '2026-08-23', title: '修复 Persona Weaver 误隐藏酒馆原生按钮', summary: '禁用人设生成器时只清理插件自己的按钮和弹窗，保留酒馆原生人设控制区，重新启用无需刷新。', content: "**问题原因：** Persona Weaver 会把自己的按钮插入酒馆原生的 `.persona_controls_buttons_block` 容器，旧版清理时误把整个容器删掉，导致酒馆自带按钮一起消失，启用后也没有挂载位置。\n\n**现在：** 只删除 `#pw_persona_tool_btn`、`#pw-wrapper`、插件浮动按钮和插件样式，保留原生容器；重新启用时按原脚本入口重新热加载，插件按钮会恢复，不需要刷新网页。",
+    }, {
         id: 'v1.23.16', version: 'v1.23.16', date: '2026-08-23', title: '适配构画与 Persona Weaver 热禁用', summary: '补齐会把入口放到页面、浮动层和 Shadow DOM 容器里的扩展禁用清理。', content: "**本次适配：** 构画（ST-SevenDaysCal）和 Persona Weaver 现在会在禁用时一并隐藏专属按钮、浮动入口、弹窗、样式和运行时监听；启用时清理旧资源并重新热加载脚本，不刷新酒馆页面。\n\n**兼容性：** 头像框管理器继续使用自带清理函数；其他扩展仍使用原有的运行时追踪和入口识别逻辑。",
     }, {
         id: 'v1.23.15', version: 'v1.23.15', date: '2026-08-23', title: '适配头像框管理器热禁用', summary: '调用头像框管理器自带清理函数，停止全局定时器并在启用时重新热加载脚本。', content: "**原因：** 头像框管理器使用全局定时器和 `window.__afmHotCleanup` 管理入口，普通运行时暂停无法收回它自己重建的菜单。\n\n**现在：** 禁用时调用插件清理、移除头像框样式和菜单；启用时重新加载插件脚本，不刷新酒馆页面。适配通过仓库地址、文件夹名和显示名识别同类头像框管理器。",
@@ -2702,9 +2704,12 @@
 
     function cleanupPersonaWeaver() {
         try { $(document).off('.pw'); } catch (error) {}
-        try { window.stPersonaWeaverBound = false; } catch (error) {}
-        document.querySelectorAll('.popup').forEach(popup => { if (popup.querySelector('.pw-wrapper')) popup.remove(); });
-        removeKnownExtensionNodes(['#pw_persona_tool_btn', '#pw-style-link', '#pw-custom-style', '.pw-float-quote-btn', '.pw-wrapper', '.persona_controls_buttons_block']);
+        try { window.stPersonaWeaverBound = false; delete window.openPersonaWeaver; } catch (error) {}
+        document.querySelectorAll('.popup').forEach(popup => {
+            if (popup.querySelector('.pw-wrapper')) popup.remove();
+        });
+        // .persona_controls_buttons_block belongs to SillyTavern; only remove Persona Weaver's own nodes.
+        removeKnownExtensionNodes(['#pw_persona_tool_btn', '#pw-style-link', '#pw-custom-style', '#pw-float-quote-btn', '.pw-float-quote-btn', '.pw-wrapper']);
     }
 
     function cleanupKnownExtensionUi(extension) {
