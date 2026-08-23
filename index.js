@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.10';
+    const SCRIPT_VERSION = '1.23.11';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,8 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.11', version: 'v1.23.11', date: '2026-08-23', title: '彻底清理卸载后的残留入口', summary: '补充未被运行时追踪的菜单和设置入口扫描，卸载后不再留下不可点击的入口。', content: '**问题原因：** 部分扩展在管理器开始追踪前就创建了菜单或设置入口，旧版卸载只能清理已追踪节点。\n\n**本次修复：** 卸载会补充识别插件中文名、显示名、名称和 ID，并扫描酒馆扩展菜单与设置容器，移除所有匹配的残留入口；普通禁用仍只隐藏入口，不会删除。',
+    }, {
         id: 'v1.23.10',
         version: 'v1.23.10',
         date: '2026-08-23',
@@ -2364,7 +2366,16 @@
     }
 
     function extensionUiLabels(extension) {
-        const rawTokens = [folderOf(extension), displayPath(extension), extension.manifest?.display_name]
+        const rawTokens = [
+            folderOf(extension),
+            displayPath(extension),
+            extension.name,
+            extension.displayName,
+            extension.zhName,
+            extension.manifest?.display_name,
+            extension.manifest?.name,
+            extension.manifest?.id,
+        ]
             .map(value => String(value || '').trim())
             .filter(Boolean);
         return Array.from(new Set(rawTokens
@@ -2458,6 +2469,25 @@
 
     function verifyExtensionUiState(extension, enabled) {
         setExtensionUiEntriesEnabled(extension, enabled);
+    }
+
+    function removeExtensionUiEntries(extension) {
+        const labels = extensionUiLabels(extension);
+        const owner = folderOf(extension).toLowerCase();
+        const remove = node => {
+            if (!(node instanceof Element) || node.id === MENU_BTN_ID || node.closest?.("#" + OVERLAY_ID)) return;
+            node.remove();
+        };
+        rememberExtensionUiEntries(extension);
+        extensionHotRuntime.dispose(owner, true);
+        extensionAssetElements(extension).forEach(element => element.remove());
+        document.querySelectorAll("#extensionsMenu .list-group-item, #extensionsMenu .menu_button, #extensionsMenu [role=menuitem], #extensionsMenu button").forEach(candidate => {
+            if (candidate.id === MENU_BTN_ID || candidate.closest?.("#" + MENU_BTN_ID)) return;
+            if (matchesExtensionUi(candidate, labels, true, true)) remove(candidate.closest(".list-group-item, [role=menuitem]") || candidate);
+        });
+        document.querySelectorAll("[id^=extensions_settings]").forEach(surface => surface.querySelectorAll("[id], [class], [data-extension], [data-name], [data-plugin], [data-extension-name], [aria-label], [title]").forEach(candidate => {
+            if (matchesExtensionUi(candidate, labels, true, false)) remove(settingEntryRoot(candidate, surface));
+        }));
     }
 
     function currentScriptFor(extension) {
@@ -2877,7 +2907,7 @@
                 writeLocalFrontendMeta(nextMeta);
                 if (window.toastr) toastr.warning(extension.displayName + " 已删除，但资料记录清理失败：" + (error.message || error));
             }
-            try { await stopExtensionHot(extension, { removeResources: true }); }
+            try { removeExtensionUiEntries(extension); }
             catch (error) { if (window.toastr) toastr.warning(extension.displayName + " 已删除，但入口和运行时清理失败：" + (error.message || error)); }
             state.selectedExtensions.delete(folder);
             whitelistState.selected.delete(folder);
