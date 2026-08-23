@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.6';
+    const SCRIPT_VERSION = '1.23.7';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -35,17 +35,95 @@
 
     function installExtensionHotRuntime() {
         const existingRuntime = window[HOT_RUNTIME_KEY];
-        if (existingRuntime?.version >= 2) return existingRuntime;
-        if (existingRuntime?.version === 1) {
-            ['pause', 'resume'].forEach(method => {
-                const previous = typeof existingRuntime[method] === 'function' ? existingRuntime[method].bind(existingRuntime) : null;
-                if (!previous) return;
-                existingRuntime[method] = (...args) => {
-                    try { return previous(...args); }
-                    catch (error) { console.warn('[Extension Manager] Recovered an older hot runtime ' + method + ' failure.', error); return true; }
+        if (existingRuntime?.version >= 3) return existingRuntime;
+        if (existingRuntime?.version >= 1) {
+            if (existingRuntime.version === 1) {
+                ['pause', 'resume'].forEach(method => {
+                    const previous = typeof existingRuntime[method] === 'function' ? existingRuntime[method].bind(existingRuntime) : null;
+                    if (!previous) return;
+                    existingRuntime[method] = (...args) => {
+                        try { return previous(...args); }
+                        catch (error) { console.warn('[Extension Manager] Recovered an older hot runtime ' + method + ' failure.', error); return true; }
+                    };
+                });
+            }
+            let captureUntil = 0;
+            const cleanFrame = document.createElement('iframe');
+            cleanFrame.hidden = true;
+            cleanFrame.setAttribute('aria-hidden', 'true');
+            document.documentElement.appendChild(cleanFrame);
+            const cleanWindow = cleanFrame.contentWindow;
+            cleanFrame.dataset.emRuntimeBridge = '1';
+            const pristine = {
+                addEventListener: cleanWindow?.EventTarget?.prototype?.addEventListener,
+                removeEventListener: cleanWindow?.EventTarget?.prototype?.removeEventListener,
+                appendChild: cleanWindow?.Node?.prototype?.appendChild,
+                insertBefore: cleanWindow?.Node?.prototype?.insertBefore,
+                replaceChild: cleanWindow?.Node?.prototype?.replaceChild,
+                insertAdjacentHTML: cleanWindow?.Element?.prototype?.insertAdjacentHTML,
+                setTimeout: cleanWindow?.setTimeout,
+                clearTimeout: cleanWindow?.clearTimeout,
+                setInterval: cleanWindow?.setInterval,
+                clearInterval: cleanWindow?.clearInterval,
+                requestAnimationFrame: cleanWindow?.requestAnimationFrame,
+                cancelAnimationFrame: cleanWindow?.cancelAnimationFrame,
+            };
+            const runQuiet = (callback, thisArg, args) => existingRuntime.runWithOwner(EXTENSION_DEFAULT_FOLDER, () => callback.apply(thisArg, args));
+            const guard = (target, method, nativeMethod = null) => {
+                const previous = target?.[method];
+                if (typeof previous !== 'function' || previous.__emQuietGuard) return;
+                const guarded = function (...args) {
+                    if (performance.now() < captureUntil) return previous.apply(this, args);
+                    if (typeof nativeMethod === 'function') return nativeMethod.apply(this, args);
+                    return runQuiet(previous, this, args);
                 };
-            });
-            existingRuntime.version = 2;
+                Object.defineProperty(guarded, '__emQuietGuard', { value: true });
+                try { target[method] = guarded; } catch (error) {}
+            };
+            const guardScheduled = (scheduleMethod, cancelMethod, oneShot) => {
+                const previousSchedule = window[scheduleMethod];
+                const previousCancel = window[cancelMethod];
+                const nativeSchedule = pristine[scheduleMethod];
+                const nativeCancel = pristine[cancelMethod];
+                if (typeof nativeSchedule !== 'function' || typeof nativeCancel !== 'function') {
+                    guard(window, scheduleMethod);
+                    guard(window, cancelMethod);
+                    return;
+                }
+                const handles = new Set();
+                const scheduled = function (callback, ...args) {
+                    if (performance.now() < captureUntil || typeof callback !== 'function') return runQuiet(previousSchedule, this, [callback, ...args]);
+                    let handle = 0;
+                    const wrapped = function (...callbackArgs) {
+                        if (oneShot) handles.delete(handle);
+                        return callback.apply(window, callbackArgs);
+                    };
+                    handle = nativeSchedule.call(this, wrapped, ...args);
+                    handles.add(handle);
+                    return handle;
+                };
+                const cancelled = function (handle) {
+                    if (handles.delete(handle)) return nativeCancel.call(this, handle);
+                    return runQuiet(previousCancel, this, [handle]);
+                };
+                Object.defineProperty(scheduled, '__emQuietGuard', { value: true });
+                Object.defineProperty(cancelled, '__emQuietGuard', { value: true });
+                window[scheduleMethod] = scheduled;
+                window[cancelMethod] = cancelled;
+            };
+            ['addEventListener', 'removeEventListener'].forEach(method => guard(EventTarget.prototype, method, pristine[method]));
+            guardScheduled('setTimeout', 'clearTimeout', true);
+            guardScheduled('setInterval', 'clearInterval', false);
+            guardScheduled('requestAnimationFrame', 'cancelAnimationFrame', true);
+            ['appendChild', 'insertBefore', 'replaceChild'].forEach(method => guard(Node.prototype, method, pristine[method]));
+            guard(Element.prototype, 'insertAdjacentHTML', pristine.insertAdjacentHTML);
+            const jq = window.jQuery || window.$;
+            ['on', 'one', 'off'].forEach(method => guard(jq?.fn, method));
+            const source = window.SillyTavern?.getContext?.().eventSource;
+            ['on', 'once', 'off', 'removeListener'].forEach(method => guard(source, method));
+            existingRuntime.beginCapture = (duration = 2500) => { captureUntil = Math.max(captureUntil, performance.now() + Math.max(0, Number(duration) || 0)); };
+            existingRuntime.version = 3;
+            existingRuntime.performanceGuardInstalled = true;
             return existingRuntime;
         }
 
@@ -73,8 +151,13 @@
             insertHtml: Element.prototype.insertAdjacentHTML,
         };
         const resources = new Map();
+        const timerItems = new Map();
+        const frameItems = new Map();
         const observers = new WeakMap();
+        const eventItems = new WeakMap();
         const paused = new Set();
+        let passiveOwnerTracking = true;
+        let passiveTrackingDeadline = performance.now() + 8000;
         let activeOwner = '';
         let skipNativeEvent = 0;
         let skipSourceEvent = 0;
@@ -93,7 +176,7 @@
             }
             return '';
         };
-        const currentOwner = () => activeOwner || ownerFromStack();
+        const currentOwner = () => activeOwner || (passiveOwnerTracking ? ownerFromStack() : '');
         const canTrack = owner => Boolean(owner && owner !== managerFolder);
         const bucket = owner => {
             const key = normalize(owner);
@@ -159,32 +242,44 @@
         };
         const inserted = node => node instanceof DocumentFragment ? Array.from(node.children) : (node instanceof Element ? [node] : []);
 
+        const eventKey = (type, options) => `${type}:${typeof options === 'boolean' ? options : options?.capture === true}`;
+        const indexedEventListeners = (target, type, options, create = false) => {
+            let targetItems = eventItems.get(target);
+            if (!targetItems && create) { targetItems = new Map(); eventItems.set(target, targetItems); }
+            if (!targetItems) return null;
+            const key = eventKey(type, options);
+            let listeners = targetItems.get(key);
+            if (!listeners && create) { listeners = new WeakMap(); targetItems.set(key, listeners); }
+            return listeners || null;
+        };
+
         EventTarget.prototype.addEventListener = function (type, listener, options) {
             const owner = skipNativeEvent ? '' : currentOwner();
             if (!canTrack(owner) || !listener) return original.addEvent.call(this, type, listener, options);
+            const listenerItems = indexedEventListeners(this, type, options, true);
             const item = { target: this, type, listener, registered: listener, options, active: true, removed: false };
             if (typeof options === 'object' && options?.once) {
                 item.registered = function (...args) {
                     item.active = false;
                     item.removed = true;
+                    listenerItems.delete(listener);
                     return typeof listener === 'function' ? listener.apply(this, args) : listener.handleEvent?.apply(listener, args);
                 };
             }
             const result = original.addEvent.call(this, type, item.registered, options);
+            listenerItems.set(listener, item);
             bucket(owner).events.push(item);
             if (paused.has(owner)) { original.removeEvent.call(this, type, item.registered, options); item.active = false; }
             return result;
         };
         EventTarget.prototype.removeEventListener = function (type, listener, options) {
-            let registered = listener;
-            resources.forEach(store => store.events.forEach(item => {
-                if (item.target === this && item.type === type && item.listener === listener) {
-                    item.active = false;
-                    item.removed = true;
-                    registered = item.registered;
-                }
-            }));
-            return original.removeEvent.call(this, type, registered, options);
+            const listeners = listener && indexedEventListeners(this, type, options);
+            const item = listeners?.get(listener);
+            if (!item) return original.removeEvent.call(this, type, listener, options);
+            item.active = false;
+            item.removed = true;
+            listeners.delete(listener);
+            return original.removeEvent.call(this, type, item.registered, options);
         };
 
         const registerTimer = (kind, callback, delay, args) => {
@@ -192,18 +287,18 @@
             if (!canTrack(owner) || typeof callback !== 'function') return original[kind](callback, delay, ...args);
             const item = { kind, delay, args, handle: 0, active: true, removed: false };
             const isTimeout = kind === 'setTimeout';
-            item.callback = wrapCallback(owner, callback, isTimeout ? () => { item.active = false; item.removed = true; } : undefined);
+            item.callback = wrapCallback(owner, callback, isTimeout ? () => { item.active = false; item.removed = true; timerItems.delete(item.handle); } : undefined);
             item.handle = original[kind](item.callback, delay, ...args);
+            timerItems.set(item.handle, item);
             bucket(owner).timers.push(item);
-            if (paused.has(owner)) { original[isTimeout ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; }
+            if (paused.has(owner)) { original[isTimeout ? 'clearTimeout' : 'clearInterval'](item.handle); timerItems.delete(item.handle); item.active = false; }
             return item.handle;
         };
         window.setTimeout = (callback, delay, ...args) => registerTimer('setTimeout', callback, delay, args);
         window.setInterval = (callback, delay, ...args) => registerTimer('setInterval', callback, delay, args);
         const clearTimer = (kind, handle) => {
-            resources.forEach(store => store.timers.forEach(item => {
-                if (item.handle === handle) { item.active = false; item.removed = true; }
-            }));
+            const item = timerItems.get(handle);
+            if (item) { item.active = false; item.removed = true; timerItems.delete(handle); }
             return original[kind](handle);
         };
         window.clearTimeout = handle => clearTimer('clearTimeout', handle);
@@ -212,21 +307,22 @@
             const owner = currentOwner();
             if (!canTrack(owner) || typeof callback !== 'function') return original.requestFrame(callback);
             const item = { handle: 0, active: true, removed: false };
-            item.callback = wrapCallback(owner, callback, () => { item.active = false; item.removed = true; });
+            item.callback = wrapCallback(owner, callback, () => { item.active = false; item.removed = true; frameItems.delete(item.handle); });
             item.handle = original.requestFrame(item.callback);
+            frameItems.set(item.handle, item);
             bucket(owner).frames.push(item);
-            if (paused.has(owner)) { original.cancelFrame(item.handle); item.active = false; }
+            if (paused.has(owner)) { original.cancelFrame(item.handle); frameItems.delete(item.handle); item.active = false; }
             return item.handle;
         };
         window.cancelAnimationFrame = handle => {
-            resources.forEach(store => store.frames.forEach(item => {
-                if (item.handle === handle) { item.active = false; item.removed = true; }
-            }));
+            const item = frameItems.get(handle);
+            if (item) { item.active = false; item.removed = true; frameItems.delete(handle); }
             return original.cancelFrame(handle);
         };
 
         Node.prototype.appendChild = function (node) {
             const owner = currentOwner();
+            if (!canTrack(owner)) return original.appendChild.call(this, node);
             const nodes = inserted(node);
             const result = original.appendChild.call(this, node);
             rememberNodes(owner, nodes);
@@ -234,6 +330,7 @@
         };
         Node.prototype.insertBefore = function (node, reference) {
             const owner = currentOwner();
+            if (!canTrack(owner)) return original.insertBefore.call(this, node, reference);
             const nodes = inserted(node);
             const result = original.insertBefore.call(this, node, reference);
             rememberNodes(owner, nodes);
@@ -241,6 +338,7 @@
         };
         Node.prototype.replaceChild = function (node, oldNode) {
             const owner = currentOwner();
+            if (!canTrack(owner)) return original.replaceChild.call(this, node, oldNode);
             const nodes = inserted(node);
             const result = original.replaceChild.call(this, node, oldNode);
             rememberNodes(owner, nodes);
@@ -248,6 +346,7 @@
         };
         Element.prototype.insertAdjacentHTML = function (position, html) {
             const owner = currentOwner();
+            if (!canTrack(owner)) return original.insertHtml.call(this, position, html);
             const parent = /beforebegin|afterend/i.test(position) ? this.parentElement : this;
             const before = new Set(parent?.children || []);
             const result = original.insertHtml.call(this, position, html);
@@ -401,8 +500,8 @@
             store.events.forEach(item => { try { if (item.active && !item.removed) original.removeEvent.call(item.target, item.type, item.registered, item.options); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'event listener', item, error); } });
             store.jquery.forEach(item => { try { if (item.active && !item.removed && original.jqueryOff) item.targets.forEach(target => original.jqueryOff.apply((window.jQuery || window.$)(target), item.offArgs)); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'jQuery listener', item, error); } });
             store.source.forEach(item => { try { if (item.active && !item.removed && original.sourceOff) original.sourceOff(item.event, item.listener); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'SillyTavern event listener', item, error); } });
-            store.timers.forEach(item => { try { if (item.active && !item.removed) original[item.kind === 'setTimeout' ? 'clearTimeout' : 'clearInterval'](item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'timer', item, error); } });
-            store.frames.forEach(item => { try { if (item.active && !item.removed) original.cancelFrame(item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'animation frame', item, error); } });
+            store.timers.forEach(item => { try { if (item.active && !item.removed) original[item.kind === 'setTimeout' ? 'clearTimeout' : 'clearInterval'](item.handle); timerItems.delete(item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'timer', item, error); } });
+            store.frames.forEach(item => { try { if (item.active && !item.removed) original.cancelFrame(item.handle); frameItems.delete(item.handle); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'animation frame', item, error); } });
             store.observers.forEach(item => { try { if (item.active && !item.removed) original[item.type]?.disconnect.call(item.instance); item.active = false; } catch (error) { ignoreToggleError(owner, 'pausing', 'observer', item, error); } });
             store.nodes.forEach(node => { try { hideNode(node); } catch (error) { ignoreToggleError(owner, 'pausing', 'interface node', node, error); } });
             store.styles.forEach(node => { try { disableStyle(node); } catch (error) { ignoreToggleError(owner, 'pausing', 'style', node, error); } });
@@ -416,8 +515,8 @@
             store.events.forEach(item => { try { if (!item.active && !item.removed) { if (typeof item.options === 'object' && item.options?.signal?.aborted) { item.removed = true; return; } original.addEvent.call(item.target, item.type, item.registered, item.options); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'event listener', item, error); } });
             store.jquery.forEach(item => { try { if (!item.active && !item.removed) { item.targets.forEach(target => item.method.apply((window.jQuery || window.$)(target), item.args)); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'jQuery listener', item, error); } });
             store.source.forEach(item => { try { if (!item.active && !item.removed && original.sourceOn) { original.sourceOn(item.event, item.listener); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'SillyTavern event listener', item, error); } });
-            store.timers.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original[item.kind](item.callback, item.delay, ...item.args); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'timer', item, error); } });
-            store.frames.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original.requestFrame(item.callback); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'animation frame', item, error); } });
+            store.timers.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original[item.kind](item.callback, item.delay, ...item.args); timerItems.set(item.handle, item); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'timer', item, error); } });
+            store.frames.forEach(item => { try { if (!item.active && !item.removed) { item.handle = original.requestFrame(item.callback); frameItems.set(item.handle, item); item.active = true; } } catch (error) { ignoreToggleError(owner, 'resuming', 'animation frame', item, error); } });
             store.observers.forEach(item => { try { if (!item.active && !item.removed) { item.targets.forEach(entry => original[item.type]?.observe.call(item.instance, entry.target, entry.options)); item.active = item.targets.length > 0; } } catch (error) { ignoreToggleError(owner, 'resuming', 'observer', item, error); } });
             store.nodes.forEach(node => { try { showNode(node); } catch (error) { ignoreToggleError(owner, 'resuming', 'interface node', node, error); } });
             store.styles.forEach(node => { try { enableStyle(node); } catch (error) { ignoreToggleError(owner, 'resuming', 'style', node, error); } });
@@ -434,6 +533,21 @@
             paused.delete(owner);
         };
 
+        const stopPassiveTracking = (force = false) => {
+            const remaining = passiveTrackingDeadline - performance.now();
+            if (!force && remaining > 0) {
+                original.setTimeout(() => stopPassiveTracking(false), remaining);
+                return;
+            }
+            passiveOwnerTracking = false;
+        };
+        const beginCapture = (duration = 2500) => {
+            const delay = Math.max(0, Number(duration) || 0);
+            passiveTrackingDeadline = Math.max(passiveTrackingDeadline, performance.now() + delay);
+            passiveOwnerTracking = true;
+            original.setTimeout(() => stopPassiveTracking(false), delay);
+        };
+
         installJquery();
         installEventSource();
         const discoveryTimer = original.setInterval(() => {
@@ -441,11 +555,15 @@
             installEventSource();
             if (jqueryReady && sourceReady) original.clearInterval(discoveryTimer);
         }, 500);
+        original.addEvent.call(document, 'pointerdown', () => stopPassiveTracking(true), { capture: true, once: true, passive: true });
+        original.addEvent.call(document, 'keydown', () => stopPassiveTracking(true), { capture: true, once: true });
+        original.setTimeout(() => stopPassiveTracking(false), 8000);
         const runtime = {
-            version: 2,
+            version: 3,
             pause,
             resume,
             dispose,
+            beginCapture,
             has: owner => resources.has(normalize(owner)),
             isPaused: owner => paused.has(normalize(owner)),
             runWithOwner: (owner, callback) => runOwned(owner, callback),
@@ -470,6 +588,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.7',
+        version: 'v1.23.7',
+        date: '2026-08-23',
+        title: '彻底降低键盘与页面操作卡顿',
+        summary: '移除正常使用期间的调用栈扫描和全量资源遍历，禁用入口只在点击时检查一次。',
+        content: '**键盘卡顿修复：** 旧热启停运行时会在页面添加事件、定时器、动画和 DOM 时反复解析调用栈，手机键盘弹出和输入会触发大量此类操作。现在扩展初始化结束、用户首次触摸或按键后就停止被动识别；正常聊天和输入不再解析调用栈。热更新到本版本时会立即用浏览器原生事件、定时器和 DOM 方法绕过旧包装器，不要求刷新页面。\n\n**高频操作提速：** 定时器、动画帧和事件监听器改为直接索引，清理时不再遍历所有插件的历史资源。Firefox 已实测事件、DOM 和定时器原生旁路全部通过，不会重新引入 Illegal invocation。\n\n**严格一次检查：** 点击禁用后只扫描一次当前插件入口并隐藏，随后立即结束。已删除 150ms、600ms、1500ms 三次复查、复查计时器，以及重新读取前端列表时对全部禁用插件的扫描。\n\n**后端说明：** 键盘、事件和 DOM 都在浏览器中运行，后端无法代替处理。本次直接移除了前端高频开销；后端继续只在用户主动读取、检测或更新时工作。',
+    }, {
         id: 'v1.23.6',
         version: 'v1.23.6',
         date: '2026-08-23',
@@ -567,7 +692,6 @@
     let extensionApiPromise = null;
     let csrfTokenOverride = '';
     let csrfRefreshPromise = null;
-    const extensionUiVerificationTimers = new Map();
 
     if (typeof window.__extensionManagerCleanup === 'function') window.__extensionManagerCleanup();
 
@@ -1001,7 +1125,6 @@
             return extension;
         }));
         state.extensions = enriched.filter(item => item.name);
-        syncExtensionUiEntries();
         return state.extensions;
     }
 
@@ -2263,35 +2386,8 @@
         rememberExtensionUiEntries(extension).forEach(node => applyExtensionUiEntryState(node, enabled, owner));
     }
 
-    function syncExtensionUiEntries() {
-        state.extensions.filter(extension => isExternal(extension) && !extension.enabled)
-            .forEach(extension => setExtensionUiEntriesEnabled(extension, false));
-    }
-
-    function cancelExtensionUiVerification(owner) {
-        (extensionUiVerificationTimers.get(owner) || []).forEach(timer => window.clearTimeout(timer));
-        extensionUiVerificationTimers.delete(owner);
-    }
-
     function verifyExtensionUiState(extension, enabled) {
-        const owner = folderOf(extension).toLowerCase();
-        cancelExtensionUiVerification(owner);
         setExtensionUiEntriesEnabled(extension, enabled);
-        if (enabled) return;
-
-        const pending = [];
-        [150, 600, 1500].forEach(delay => {
-            const timer = window.setTimeout(() => {
-                const remaining = (extensionUiVerificationTimers.get(owner) || []).filter(item => item !== timer);
-                if (remaining.length) extensionUiVerificationTimers.set(owner, remaining);
-                else extensionUiVerificationTimers.delete(owner);
-                const current = state.extensions.find(item => folderOf(item).toLowerCase() === owner);
-                if (!current || current.enabled) return;
-                setExtensionUiEntriesEnabled(current, false);
-            }, delay);
-            pending.push(timer);
-        });
-        extensionUiVerificationTimers.set(owner, pending);
     }
 
     function currentScriptFor(extension) {
@@ -2392,6 +2488,7 @@
         const source = script?.src || `/scripts/extensions/${displayPath(extension)}/${extension.manifest?.js || 'index.js'}`;
         const url = new URL(source, document.baseURI || location.href);
         url.searchParams.set(cacheKey, Date.now());
+        extensionHotRuntime.beginCapture?.();
         await new Promise((resolve, reject) => {
             const next = document.createElement('script');
             next.type = script?.type || 'module';
@@ -2449,7 +2546,6 @@
         const mode = extensionHotToggleMode(extension);
         const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
-        if (enabled) cancelExtensionUiVerification(folder.toLowerCase());
 
         if (isNyFontManager(extension)) {
             if (!enabled) {
@@ -3672,7 +3768,7 @@
                 body: JSON.stringify({ url, global, branch }),
             });
             const api = await getExtensionApi();
-            if (typeof api.loadExtensionSettings === 'function') await api.loadExtensionSettings({}, false, false);
+            if (typeof api.loadExtensionSettings === 'function') { extensionHotRuntime.beginCapture?.(); await api.loadExtensionSettings({}, false, false); }
             await discover();
             const extension = state.extensions.find(item => folderOf(item) === normalizeName(installed?.folderName || ''));
             if (extension) {
@@ -5525,5 +5621,5 @@
     injectStyle();
     timers.push(setTimeout(injectMenu, 500));
     timers.push(setInterval(injectMenu, 2000));
-    window.__extensionManagerCleanup = () => { extensionUiVerificationTimers.forEach(items => items.forEach(timer => window.clearTimeout(timer))); extensionUiVerificationTimers.clear(); timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
+    window.__extensionManagerCleanup = () => { timers.splice(0).forEach(timer => { clearTimeout(timer); clearInterval(timer); }); $(`#${MENU_BTN_ID}`).remove(); $(`#${OVERLAY_ID}`).remove(); $(`#${FLOAT_ID}`).remove(); $(`#${STYLE_ID}`).remove(); };
 })();
