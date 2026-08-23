@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.18';
+    const SCRIPT_VERSION = '1.23.19';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,8 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.19', version: 'v1.23.19', date: '2026-08-24', title: '适配酒馆首页文件分类并优化热更新逻辑', summary: '禁用聊天归档类扩展时恢复酒馆原生首页；热更新改为带缓存令牌的脚本重载和安全样式替换。', content: "**聊天归档适配：** 禁用 Chat Archive 或类似首页增强扩展时，会移除归档区、插件弹窗和设置入口，恢复酒馆原生最近聊天区域；启用后重新扫描首页，不需要刷新网页。\n\n**热更新优化：** 更新前先停止旧运行时，再给脚本和样式追加一次性缓存令牌；新样式加载成功后才替换旧样式，减少半更新状态和浏览器复用旧模块缓存的问题。",
+    }, {
         id: 'v1.23.18', version: 'v1.23.18', date: '2026-08-23', title: '防止特殊适配误清理其他插件入口', summary: '收紧共享弹窗和事件清理范围，避免影响酒馆助手等其他扩展。', content: "**问题原因：** 旧版 Persona Weaver 清理使用全局 `$(document).off('.pw')`，可能移除其他扩展复用的同名事件；头像框管理器也会按通用 `.nsk-overlay` 删除弹窗。\n\n**现在：** Persona Weaver 不再执行全局命名空间解绑，只由扩展管理器运行时按所有者清理；头像框管理器只删除能确认属于头像框管理器的弹窗，不再碰其他插件的共享弹窗。",
     }, {
         id: 'v1.23.17', version: 'v1.23.17', date: '2026-08-23', title: '修复 Persona Weaver 误隐藏酒馆原生按钮', summary: '禁用人设生成器时只清理插件自己的按钮和弹窗，保留酒馆原生人设控制区，重新启用无需刷新。', content: "**问题原因：** Persona Weaver 会把自己的按钮插入酒馆原生的 `.persona_controls_buttons_block` 容器，旧版清理时误把整个容器删掉，导致酒馆自带按钮一起消失，启用后也没有挂载位置。\n\n**现在：** 只删除 `#pw_persona_tool_btn`、`#pw-wrapper`、插件浮动按钮和插件样式，保留原生容器；重新启用时按原脚本入口重新热加载，插件按钮会恢复，不需要刷新网页。",
@@ -2599,7 +2601,9 @@
         if (!js) return true;
         const source = script?.src || `/scripts/extensions/${displayPath(extension)}/${extension.manifest?.js || 'index.js'}`;
         const url = new URL(source, document.baseURI || location.href);
+        const token = `${cacheKey}-${Date.now()}`;
         url.searchParams.set(cacheKey, Date.now());
+        url.searchParams.set('st_hot_reload', token);
         extensionHotRuntime.beginCapture?.();
         await new Promise((resolve, reject) => {
             const next = document.createElement('script');
@@ -2611,6 +2615,32 @@
             extensionHotRuntime.runWithOwner(folderOf(extension), () => document.body.appendChild(next));
         });
         return true;
+    }
+
+    async function hotReplaceExtensionStyle(extension) {
+        const css = String(extension.manifest?.css || '').trim();
+        if (!css) return false;
+        const oldLinks = extensionAssetElements(extension).filter(element => element.tagName === 'LINK');
+        const url = new URL(extensionFileUrl(extension, css));
+        url.searchParams.set('st_hot_reload', `style-${Date.now()}`);
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = url.href;
+        link.dataset.extensionManagerHot = '1';
+        try {
+            await new Promise((resolve, reject) => {
+                link.onload = resolve;
+                link.onerror = () => reject(new Error('重新加载扩展样式失败'));
+                document.head.appendChild(link);
+            });
+            oldLinks.forEach(element => element.remove());
+            return true;
+        } catch (error) {
+            link.remove();
+            if (!oldLinks.length) throw error;
+            console.warn('[Extension Manager] Keeping previous extension style after hot replacement failure.', folderOf(extension), error);
+            return false;
+        }
     }
 
     async function hotReload(extension) {
@@ -2628,9 +2658,9 @@
         }
         rememberExtensionUiEntries(extension);
         extensionHotRuntime.dispose(folder, true);
-        extensionAssetElements(extension).forEach(element => element.remove());
-        await ensureExtensionStyle(extension);
+        extensionScriptElements(extension).forEach(element => element.remove());
         await loadExtensionEntry(extension, 'em_update');
+        await hotReplaceExtensionStyle(extension);
         return true;
     }
 
@@ -2673,6 +2703,21 @@
         });
     }
 
+    function isChatArchiveExtension(extension) {
+        const identity = [folderOf(extension), displayPath(extension), extension.manifest?.display_name, extension.manifest?.name, extension.displayName, extension.manifest?.homePage, extension.manifest?.repository].join(' ');
+        return /sillytavern[-_ ]chat[-_ ]archive|chat[-_ ]archive|酒馆首页文件分类|聊天归档/i.test(identity);
+    }
+
+    function cleanupChatArchive() {
+        document.querySelectorAll('.welcomePanel').forEach(panel => {
+            panel.querySelectorAll('.stca-home, .stca-server-warning').forEach(element => element.remove());
+            panel.querySelectorAll('.stca-core-hidden').forEach(element => element.classList.remove('stca-core-hidden'));
+            panel.classList.remove('stca-enhanced');
+            delete panel.dataset.stcaState;
+        });
+        document.querySelectorAll('#stca-settings, .stca-overlay, .stca-confirm-overlay').forEach(element => element.remove());
+    }
+
     function isSchedulePlannerExtension(extension) {
         const identity = [folderOf(extension), displayPath(extension), extension.manifest?.display_name, extension.manifest?.name, extension.displayName, extension.manifest?.homePage, extension.manifest?.repository].join(" ");
         return /ST-SevenDaysCal|schedule-planner|构画|seven.?days.?cal/i.test(identity);
@@ -2684,7 +2729,7 @@
     }
 
     function isSpecialRuntimeExtension(extension) {
-        return isAvatarFrameManager(extension) || isSchedulePlannerExtension(extension) || isPersonaWeaverExtension(extension);
+        return isAvatarFrameManager(extension) || isSchedulePlannerExtension(extension) || isPersonaWeaverExtension(extension) || isChatArchiveExtension(extension);
     }
 
     function removeKnownExtensionNodes(selectors) {
@@ -2722,6 +2767,7 @@
         if (isAvatarFrameManager(extension)) cleanupAvatarFrameManager();
         if (isSchedulePlannerExtension(extension)) cleanupSchedulePlanner();
         if (isPersonaWeaverExtension(extension)) cleanupPersonaWeaver();
+        if (isChatArchiveExtension(extension)) cleanupChatArchive();
     }
 
     async function stopExtensionHot(extension, options = {}) {
