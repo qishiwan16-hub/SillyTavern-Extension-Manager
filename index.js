@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.14';
+    const SCRIPT_VERSION = '1.23.16';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,9 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.16', version: 'v1.23.16', date: '2026-08-23', title: '适配构画与 Persona Weaver 热禁用', summary: '补齐会把入口放到页面、浮动层和 Shadow DOM 容器里的扩展禁用清理。', content: "**本次适配：** 构画（ST-SevenDaysCal）和 Persona Weaver 现在会在禁用时一并隐藏专属按钮、浮动入口、弹窗、样式和运行时监听；启用时清理旧资源并重新热加载脚本，不刷新酒馆页面。\n\n**兼容性：** 头像框管理器继续使用自带清理函数；其他扩展仍使用原有的运行时追踪和入口识别逻辑。",
+    }, {
+        id: 'v1.23.15', version: 'v1.23.15', date: '2026-08-23', title: '适配头像框管理器热禁用', summary: '调用头像框管理器自带清理函数，停止全局定时器并在启用时重新热加载脚本。', content: "**原因：** 头像框管理器使用全局定时器和 `window.__afmHotCleanup` 管理入口，普通运行时暂停无法收回它自己重建的菜单。\n\n**现在：** 禁用时调用插件清理、移除头像框样式和菜单；启用时重新加载插件脚本，不刷新酒馆页面。适配通过仓库地址、文件夹名和显示名识别同类头像框管理器。",
         id: 'v1.23.14', version: 'v1.23.14', date: '2026-08-23', title: '回滚到 v1.23.7 热禁用与检测基线', summary: '恢复 v1.23.7 的禁用和检测核心逻辑；卸载仅在启用时先禁用，再删除扩展目录。', content: "**禁用与检测：** 核对并恢复 v1.23.7 的热禁用分支和检测调度基线，不再把卸载清理逻辑混入用户手动禁用。\n\n**卸载顺序：** 已禁用扩展直接删除目录；启用扩展先执行一次禁用，再请求删除目录，避免脚本和入口在删除完成前继续运行。",
         id: 'v1.23.13', version: 'v1.23.13', date: '2026-08-23', title: '修复禁用入口复现并简化仓库导入', summary: '禁用后补做一次入口复核，导入 GitHub 地址时自动去掉末尾 .git。', content: "**禁用修复：** 酒馆切换扩展状态后如果重新创建入口，管理器会在下一帧再次隐藏，避免面板继续可交互；不使用常驻扫描。\n\n**导入优化：** 输入以 `.git` 结尾的 GitHub 仓库地址会在安装请求前自动去掉后缀。",
         id: 'v1.23.12', version: 'v1.23.12', date: '2026-08-23', title: '卸载前立即隐藏扩展入口', summary: '卸载现在先执行禁用热清理，删除请求期间入口不可见、不可交互。', content: "**处理顺序：** 点击卸载后先立即隐藏入口、停止事件和定时器、禁用样式，再请求删除扩展文件。删除完成后继续清理残留资源；如果删除请求失败，会尝试恢复扩展。",
@@ -2476,6 +2479,7 @@
     }
 
     function removeExtensionUiEntries(extension) {
+        cleanupKnownExtensionUi(extension);
         const labels = extensionUiLabels(extension);
         const owner = folderOf(extension).toLowerCase();
         const remove = node => {
@@ -2607,6 +2611,7 @@
 
     async function hotReload(extension) {
         const folder = folderOf(extension);
+        cleanupKnownExtensionUi(extension);
         const cleanupName = extensionCleanupName(extension);
         if (typeof window[cleanupName] === 'function') {
             try { await window[cleanupName](); }
@@ -2646,17 +2651,81 @@
             .forEach(element => { element.disabled = !enabled; });
     }
 
+    function isAvatarFrameManager(extension) {
+        const identity = [folderOf(extension), displayPath(extension), extension.manifest?.homePage, extension.manifest?.homepage, extension.manifest?.repository, extension.displayName].join(" ");
+        return /avatar[-_ ]frame[-_ ]manager/i.test(identity);
+    }
+
+    function cleanupAvatarFrameManager() {
+        try { if (typeof window.__afmHotCleanup === "function") window.__afmHotCleanup(); } catch (error) { console.warn("[Extension Manager] Avatar frame cleanup failed.", error); }
+        ["__afmMenuWatcherTimer", "__afmThemeBindingWatcherTimer", "__afmThemeBindingDebounceTimer"].forEach(key => {
+            const handle = window[key];
+            if (handle) { try { clearTimeout(handle); } catch (error) {} try { clearInterval(handle); } catch (error) {} }
+            try { delete window[key]; } catch (error) { window[key] = null; }
+        });
+        document.querySelectorAll("#st-avatar-frame-ext-btn, #native-avatar-frame-style, #st-avatar-frame-applied-css, .nsk-overlay").forEach(element => element.remove());
+    }
+
+    function isSchedulePlannerExtension(extension) {
+        const identity = [folderOf(extension), displayPath(extension), extension.manifest?.display_name, extension.manifest?.name, extension.displayName, extension.manifest?.homePage, extension.manifest?.repository].join(" ");
+        return /ST-SevenDaysCal|schedule-planner|构画|seven.?days.?cal/i.test(identity);
+    }
+
+    function isPersonaWeaverExtension(extension) {
+        const identity = [folderOf(extension), displayPath(extension), extension.manifest?.display_name, extension.manifest?.name, extension.displayName, extension.manifest?.homePage, extension.manifest?.repository].join(" ");
+        return /st-persona-weaver|persona.?weaver|人设生成器/i.test(identity);
+    }
+
+    function isSpecialRuntimeExtension(extension) {
+        return isAvatarFrameManager(extension) || isSchedulePlannerExtension(extension) || isPersonaWeaverExtension(extension);
+    }
+
+    function removeKnownExtensionNodes(selectors) {
+        const roots = [document];
+        const visit = root => {
+            selectors.forEach(selector => {
+                try { root.querySelectorAll(selector).forEach(element => element.remove()); } catch (error) {}
+            });
+            root.querySelectorAll?.('*').forEach(element => { if (element.shadowRoot) { roots.push(element.shadowRoot); visit(element.shadowRoot); } });
+        };
+        visit(document);
+    }
+
+    function cleanupSchedulePlanner() {
+        removeKnownExtensionNodes([
+            '#sp_open_wand', '#sp-fab', '#sp_wand_container', '#sp-body', '#sp-dialog-host', '#sp-modal-root',
+            '#sp-settings-overlay', '#sp-outline-wrap', '#sp-lines-wrap', '#sp-space-wrap', '#sp-theater-wrap',
+            '#sp-anchor-wrap', '#sp-almanac-wrap', '#sp-content-title', '#sp-sub-toggle', '#sp-toast-wrap',
+            '#sp-addon-dialog', '#sp-store-conflict', '.sp-inline-box', '.sp-anchor-btn', '[data-sp-root]'
+        ]);
+    }
+
+    function cleanupPersonaWeaver() {
+        try { $(document).off('.pw'); } catch (error) {}
+        try { window.stPersonaWeaverBound = false; } catch (error) {}
+        document.querySelectorAll('.popup').forEach(popup => { if (popup.querySelector('.pw-wrapper')) popup.remove(); });
+        removeKnownExtensionNodes(['#pw_persona_tool_btn', '#pw-style-link', '#pw-custom-style', '.pw-float-quote-btn', '.pw-wrapper', '.persona_controls_buttons_block']);
+    }
+
+    function cleanupKnownExtensionUi(extension) {
+        if (isAvatarFrameManager(extension)) cleanupAvatarFrameManager();
+        if (isSchedulePlannerExtension(extension)) cleanupSchedulePlanner();
+        if (isPersonaWeaverExtension(extension)) cleanupPersonaWeaver();
+    }
+
     async function stopExtensionHot(extension, options = {}) {
         const folder = folderOf(extension);
+        cleanupKnownExtensionUi(extension);
         verifyExtensionUiState(extension, false);
         extensionHotRuntime.pause(folder);
         await setExtensionStylesEnabled(extension, false);
+        await nextPaint();
+        cleanupKnownExtensionUi(extension);
+        verifyExtensionUiState(extension, false);
         if (options.removeResources) {
             extensionHotRuntime.dispose(folder, true);
             extensionAssetElements(extension).forEach(element => element.remove());
             verifyExtensionUiState(extension, false);
-            extensionHotRuntime.dispose(folder, true);
-            extensionAssetElements(extension).forEach(element => element.remove());
         }
     }
 
@@ -2665,11 +2734,20 @@
         const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
 
-        if (isNyFontManager(extension)) {
+        if (isSpecialRuntimeExtension(extension)) {
             if (!enabled) {
-                verifyExtensionUiState(extension, false);
-                extensionHotRuntime.pause(folder);
+                await stopExtensionHot(extension);
+            } else {
+                cleanupKnownExtensionUi(extension);
+                extensionHotRuntime.dispose(folder, true);
+                extensionAssetElements(extension).forEach(element => element.remove());
+                await setExtensionStylesEnabled(extension, true);
+                await loadExtensionEntry(extension, 'em_hot_start');
+                extensionHotRuntime.resume(folder);
+                verifyExtensionUiState(extension, true);
             }
+        } else if (isNyFontManager(extension)) {
+            if (!enabled) await stopExtensionHot(extension);
             await toggleNyFontManagerHot(extension, enabled);
             await setExtensionStylesEnabled(extension, enabled);
             if (enabled) {
@@ -2677,9 +2755,7 @@
                 verifyExtensionUiState(extension, true);
             }
         } else if (!enabled) {
-            verifyExtensionUiState(extension, false);
-            extensionHotRuntime.pause(folder);
-            await setExtensionStylesEnabled(extension, false);
+            await stopExtensionHot(extension);
         } else {
             await setExtensionStylesEnabled(extension, true);
             const resumed = extensionHotRuntime.resume(folder);
