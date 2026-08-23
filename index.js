@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.8';
+    const SCRIPT_VERSION = '1.23.9';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.9',
+        version: 'v1.23.9',
+        date: '2026-08-23',
+        title: '修复卸载接口返回格式',
+        summary: '修复卸载前端扩展时酒馆返回纯文本导致的 JSON 报错。',
+        content: '**问题原因：** 酒馆原生删除接口会先删除扩展目录，然后返回一段纯文本确认信息；旧版请求解析器强制按 JSON 读取，因此文件可能已经删除，却在页面显示“不是 JSON”的卸载失败。\n\n**现在的处理：** 请求解析器会根据内容尝试读取 JSON；遇到酒馆的纯文本删除结果也会视为成功。随后扩展管理器会热清理脚本、样式、事件和入口，清除中文资料与白名单记录，并重新读取扩展列表，不需要刷新网页。',
+    }, {
         id: 'v1.23.8',
         version: 'v1.23.8',
         date: '2026-08-23',
@@ -802,7 +809,10 @@
             error.status = response.status;
             throw error;
         }
-        return response.status === 204 ? {} : response.json();
+        if (response.status === 204) return {};
+        const body = await response.text();
+        if (!body.trim()) return {};
+        try { return JSON.parse(body); } catch (error) { return body; }
     }
 
     async function withButtonBusy($button, label, action) {
