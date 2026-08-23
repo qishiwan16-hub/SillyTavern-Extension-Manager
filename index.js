@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.9';
+    const SCRIPT_VERSION = '1.23.10';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,13 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.10',
+        version: 'v1.23.10',
+        date: '2026-08-23',
+        title: '修复卸载后入口残留',
+        summary: '卸载流程现在复用禁用扩展的入口和运行时清理逻辑。',
+        content: '**问题原因：** 禁用扩展时会扫描并隐藏扩展菜单入口、设置入口、脚本事件和样式；旧版卸载只清理已经被运行时追踪的节点，部分入口没有被追踪，因此文件夹删除后入口仍然可见。\n\n**现在的处理：** 卸载前会复用禁用流程，先隐藏入口、停止事件/定时器/观察器并禁用样式；删除目录成功后再移除脚本、样式和已记录的界面节点，清理资料并重新读取扩展状态。',
+    }, {
         id: 'v1.23.9',
         version: 'v1.23.9',
         date: '2026-08-23',
@@ -2605,16 +2612,27 @@
             .forEach(element => { element.disabled = !enabled; });
     }
 
+    async function stopExtensionHot(extension, options = {}) {
+        const folder = folderOf(extension);
+        verifyExtensionUiState(extension, false);
+        extensionHotRuntime.pause(folder);
+        await setExtensionStylesEnabled(extension, false);
+        if (options.removeResources) {
+            extensionHotRuntime.dispose(folder, true);
+            extensionAssetElements(extension).forEach(element => element.remove());
+            verifyExtensionUiState(extension, false);
+            extensionHotRuntime.dispose(folder, true);
+            extensionAssetElements(extension).forEach(element => element.remove());
+        }
+    }
+
     async function toggleExtensionHot(extension, enabled) {
         const mode = extensionHotToggleMode(extension);
         const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
 
         if (isNyFontManager(extension)) {
-            if (!enabled) {
-                verifyExtensionUiState(extension, false);
-                extensionHotRuntime.pause(folder);
-            }
+            if (!enabled) await stopExtensionHot(extension);
             await toggleNyFontManagerHot(extension, enabled);
             await setExtensionStylesEnabled(extension, enabled);
             if (enabled) {
@@ -2622,9 +2640,7 @@
                 verifyExtensionUiState(extension, true);
             }
         } else if (!enabled) {
-            verifyExtensionUiState(extension, false);
-            extensionHotRuntime.pause(folder);
-            await setExtensionStylesEnabled(extension, false);
+            await stopExtensionHot(extension);
         } else {
             await setExtensionStylesEnabled(extension, true);
             const resumed = extensionHotRuntime.resume(folder);
@@ -2861,14 +2877,15 @@
                 writeLocalFrontendMeta(nextMeta);
                 if (window.toastr) toastr.warning(extension.displayName + " 已删除，但资料记录清理失败：" + (error.message || error));
             }
-            try { extensionHotRuntime.dispose(folder, true); }
-            catch (error) { if (window.toastr) toastr.warning(extension.displayName + " 已删除，但运行时清理失败：" + (error.message || error)); }
-            try { extensionAssetElements(extension).forEach(element => element.remove()); }
-            catch (error) { if (window.toastr) toastr.warning(extension.displayName + " 已删除，但页面资源清理失败：" + (error.message || error)); }
+            try { await stopExtensionHot(extension, { removeResources: true }); }
+            catch (error) { if (window.toastr) toastr.warning(extension.displayName + " 已删除，但入口和运行时清理失败：" + (error.message || error)); }
             state.selectedExtensions.delete(folder);
             whitelistState.selected.delete(folder);
             detectionResults.selected.delete(folder);
             state.updates.delete(folder);
+            state.checkingExtensions.delete(folder);
+            state.updating.delete(folder);
+            state.togglingExtensions.delete(folder);
             try { await discover({ freshManifests: true }); }
             catch (error) {
                 state.extensions = state.extensions.filter(item => folderOf(item) !== folder);
