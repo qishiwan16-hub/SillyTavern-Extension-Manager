@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.19';
+    const SCRIPT_VERSION = '1.23.20';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -579,6 +579,10 @@
 
     const extensionHotRuntime = installExtensionHotRuntime();
     const FAQ_ITEMS = [{
+        id: 'disable-residual-display',
+        title: '禁用扩展后页面还有残留显示怎么办？',
+        solution: '**这是因为该插件的运行时无法被扩展管理器完整接管。** 请先刷新一次酒馆网页，让页面重新加载插件状态和入口。若刷新后仍有问题，请到 Discord 对应帖子内 @ 插件作者反馈。',
+    }, {
         id: 'invalid-csrf-token',
         title: '1.15.0 以及更高版本酒馆出现 ForbiddenError: Invalid CSRF token',
         solution: '**扩展管理器会在遇到此错误时自动刷新 CSRF token 并重试一次。**\n\n1. 请先更新扩展并刷新网页。\n2. 若仍不行，请先关闭 SillyTavern 后端，将 `config.yaml` 中 `disableCsrfProtection` 的 `false` 修改为 `true`，保存后重新启动 SillyTavern。\n\n> **注意：** ==此操作会降低 CSRF 防护==，仅建议作为最后的临时排查手段。',
@@ -588,6 +592,8 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.20', version: 'v1.23.20', date: '2026-08-24', title: '补充禁用残留显示问题说明', summary: '新增禁用后仍有残留显示时的处理方法和反馈渠道。', content: "**常见情况：** 少数扩展无法被热更新完整接管，禁用后可能还会留下旧界面。\n\n**处理方法：** 刷新一次酒馆网页，让插件状态和入口重新加载；如果仍有问题，请到 Discord 对应帖子内 @ 插件作者反馈。",
+    }, {
         id: 'v1.23.19', version: 'v1.23.19', date: '2026-08-24', title: '适配酒馆首页文件分类并优化热更新逻辑', summary: '禁用聊天归档类扩展时恢复酒馆原生首页；热更新改为带缓存令牌的脚本重载和安全样式替换。', content: "**聊天归档适配：** 禁用 Chat Archive 或类似首页增强扩展时，会移除归档区、插件弹窗和设置入口，恢复酒馆原生最近聊天区域；启用后重新扫描首页，不需要刷新网页。\n\n**热更新优化：** 更新前先停止旧运行时，再给脚本和样式追加一次性缓存令牌；新样式加载成功后才替换旧样式，减少半更新状态和浏览器复用旧模块缓存的问题。",
     }, {
         id: 'v1.23.18', version: 'v1.23.18', date: '2026-08-23', title: '防止特殊适配误清理其他插件入口', summary: '收紧共享弹窗和事件清理范围，避免影响酒馆助手等其他扩展。', content: "**问题原因：** 旧版 Persona Weaver 清理使用全局 `$(document).off('.pw')`，可能移除其他扩展复用的同名事件；头像框管理器也会按通用 `.nsk-overlay` 删除弹窗。\n\n**现在：** Persona Weaver 不再执行全局命名空间解绑，只由扩展管理器运行时按所有者清理；头像框管理器只删除能确认属于头像框管理器的弹窗，不再碰其他插件的共享弹窗。",
