@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.23.11';
+    const SCRIPT_VERSION = '1.23.12';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -588,6 +588,8 @@
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
     const CHANGELOG_ITEMS = [{
+        id: 'v1.23.12', version: 'v1.23.12', date: '2026-08-23', title: '卸载前立即隐藏扩展入口', summary: '卸载现在先执行禁用热清理，删除请求期间入口不可见、不可交互。', content: "**处理顺序：** 点击卸载后先立即隐藏入口、停止事件和定时器、禁用样式，再请求删除扩展文件。删除完成后继续清理残留资源；如果删除请求失败，会尝试恢复扩展。",
+    }, {
         id: 'v1.23.11', version: 'v1.23.11', date: '2026-08-23', title: '彻底清理卸载后的残留入口', summary: '补充未被运行时追踪的菜单和设置入口扫描，卸载后不再留下不可点击的入口。', content: '**问题原因：** 部分扩展在管理器开始追踪前就创建了菜单或设置入口，旧版卸载只能清理已追踪节点。\n\n**本次修复：** 卸载会补充识别插件中文名、显示名、名称和 ID，并扫描酒馆扩展菜单与设置容器，移除所有匹配的残留入口；普通禁用仍只隐藏入口，不会删除。',
     }, {
         id: 'v1.23.10',
@@ -2890,8 +2892,11 @@
         }
         if (!options.confirmed && !window.confirm("确认卸载前端扩展“" + extension.displayName + "”？此操作会删除扩展文件，且无法撤销。")) return false;
         state.uninstalling.add(folder);
+        let stoppedForUninstall = false;
         renderList($popup);
         try {
+            await stopExtensionHot(extension);
+            stoppedForUninstall = true;
             await request("/api/extensions/delete", { method: "POST", body: JSON.stringify({ extensionName: folder, global: isGlobal(extension) }) });
             const cleanupName = extensionCleanupName(extension);
             try { if (typeof window[cleanupName] === "function") await window[cleanupName](); }
@@ -2924,6 +2929,9 @@
             if (!options.quiet && window.toastr) toastr.success(extension.displayName + " 已卸载并热清理，无需刷新网页");
             return true;
         } catch (error) {
+            if (stoppedForUninstall) {
+                try { await toggleExtensionHot(extension, true); } catch (restoreError) {}
+            }
             if (window.toastr) toastr.error(extension.displayName + " 卸载失败：" + (error.message || error));
             return false;
         } finally {
