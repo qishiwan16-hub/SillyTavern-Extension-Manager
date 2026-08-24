@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.24.0';
+    const SCRIPT_VERSION = '1.24.1';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -195,7 +195,8 @@
             return '';
         };
         const currentOwner = () => activeOwner || (passiveOwnerTracking ? ownerFromStack() : '');
-        const canTrack = owner => Boolean(owner && owner !== managerFolder);
+        const isProtectedRuntimeOwner = owner => /(?:js[-_]slash[-_]runner|tavern[-_]?helper|tavernhelper|n0vi028)/i.test(normalize(owner));
+        const canTrack = owner => Boolean(owner && owner !== managerFolder && !isProtectedRuntimeOwner(owner));
         const bucket = owner => {
             const key = normalize(owner);
             if (!resources.has(key)) resources.set(key, { events: [], jquery: [], source: [], timers: [], frames: [], observers: [], nodes: new Set(), styles: new Set() });
@@ -596,7 +597,7 @@
     }
 
     const extensionHotRuntime = installExtensionHotRuntime();
-    const FAQ_ITEMS = [{
+    const FAQ_ITEMS = [{ id: "tavern-helper-compatibility", title: "酒馆助手或 JS-Slash-Runner 使用异常怎么办？", solution: "**这类扩展包含模块化脚本、共享事件和 iframe 运行时，不能按普通单文件扩展强行暂停。** 新版会自动跳过资源接管，并在启用、禁用或高风险更新时等待生成结束后无感刷新页面。若生成一直未结束，请先等生成完成，再到设置点击“无感刷新”；刷新后仍有异常，请确认酒馆助手自身可以单独正常加载。" }, {
         id: 'disable-residual-display',
         title: '禁用扩展后页面还有残留显示怎么办？',
         solution: '**这是因为该插件的运行时无法被扩展管理器完整接管。** 请先刷新一次酒馆网页，让页面重新加载插件状态和入口。若刷新后仍有问题，请到 Discord 对应帖子内 @ 插件作者反馈。',
@@ -609,7 +610,7 @@
         title: '检测更新返回 403 Forbidden 或 HTML 错误页面',
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
-    const CHANGELOG_ITEMS = [{
+    const CHANGELOG_ITEMS = [{ id: "v1.24.1", version: "v1.24.1", date: "2026-08-24", title: "修复酒馆助手类扩展兼容性", summary: "大型模块化扩展不再被普通热启停逻辑误处理，启用、禁用和更新会按需要无感刷新。", content: "**问题原因：** 酒馆助手类扩展会同时使用模块化脚本、共享事件、jQuery、iframe 和观察器，普通扩展的资源接管可能误判归属，导致入口或功能无法正常适配。\n\n**现在的处理：** 这类扩展会跳过资源暂停和清理，启用、禁用及高风险更新在等待生成结束后重建页面运行时；普通扩展仍保持原来的热更新。若生成一直未结束，可在设置中手动点击“无感刷新”。" }, {
         id: 'v1.24.0', version: 'v1.24.0', date: '2026-08-24', title: '新增按风险选择热更新和无感刷新', summary: '可直接接管的扩展继续热更新；本地模块或热加载失败的扩展自动使用无感刷新安全应用。', content: "**现在的处理：** 单文件、运行时资源可追踪的扩展继续直接热更新；检测到同目录本地模块、Worker 等浏览器缓存风险时，更新后自动带一次性令牌无感刷新页面。若直接热更新失败，也会自动降级到无感刷新。\n\n**刷新后的状态：** 页面启动后会清理令牌并提示扩展状态已重新读取，不需要用户手动点击刷新。",
     }, {
         id: 'v1.23.20', version: 'v1.23.20', date: '2026-08-24', title: '补充禁用残留显示问题说明', summary: '新增禁用后仍有残留显示时的处理方法和反馈渠道。', content: "**常见情况：** 少数扩展无法被热更新完整接管，禁用后可能还会留下旧界面。\n\n**处理方法：** 刷新一次酒馆网页，让插件状态和入口重新加载；如果仍有问题，请到 Discord 对应帖子内 @ 插件作者反馈。",
@@ -2669,7 +2670,13 @@
         }
     }
 
+    function isTavernHelperExtension(extension) {
+        const identity = [extension?.id, extension?.folder, extension?.name, extension?.displayName, extension?.repository, extension?.homePage].filter(Boolean).join(" ").toLowerCase();
+        return identity.includes("js-slash-runner") || identity.includes("tavernhelper") || identity.includes("tavern-helper") || identity.includes("n0vi028") || identity.includes("酒馆助手");
+    }
+
     async function shouldUseSeamlessReload(extension) {
+        if (isTavernHelperExtension(extension)) return true;
         if (!extension?.enabled || isSpecialRuntimeExtension(extension)) return false;
         const js = String(extension.manifest?.js || '').trim();
         if (!js || extension.manifest?.extension_hot_reload?.self_managed_modules === true || extension.manifest?.hot_reload?.self_managed_modules === true) return false;
@@ -2886,6 +2893,15 @@
         const mode = extensionHotToggleMode(extension);
         const folder = folderOf(extension);
         await setExtensionEnabled(extension, enabled, false);
+
+        if (isTavernHelperExtension(extension)) {
+            const ready = await waitForGenerationIdle();
+            if (ready) {
+                await requestSeamlessReload(extension, enabled ? "酒馆助手已启用，需要重建页面运行时" : "酒馆助手已禁用，需要清理模块运行时");
+            }
+            if (!ready && window.toastr) toastr.warning(extension.displayName + " 状态已保存，生成结束后请点击设置里的“无感刷新”");
+            return { ...extension, enabled, hot: false, mode: "seamless-reload" };
+        }
 
         if (isSpecialRuntimeExtension(extension)) {
             if (!enabled) {
