@@ -4,7 +4,7 @@
     'use strict';
 
     const SCRIPT_NAME = '扩展管理器';
-    const SCRIPT_VERSION = '1.24.1';
+    const SCRIPT_VERSION = '1.24.2';
     const MENU_BTN_ID = 'st-extension-manager-btn';
     const STYLE_ID = 'st-extension-manager-style';
     const OVERLAY_ID = 'st-extension-manager-overlay';
@@ -610,7 +610,7 @@
         title: '检测更新返回 403 Forbidden 或 HTML 错误页面',
         solution: '**这是 HTTP 访问权限或登录校验拒绝**，检测请求在进入 Git 更新逻辑前就被 SillyTavern、反向代理或登录中间件拦截，并非 GitHub 仓库或插件代码报错。\n\n扩展管理器会针对这种裸 403 自动刷新 CSRF token 并重试一次。请先更新扩展管理器并刷新酒馆页面；仍失败时请退出后重新登录，确认当前账号有权管理该扩展。若扩展安装在全局目录，请使用管理员账号操作，或将扩展重新安装到当前用户目录。使用反向代理时，请确认 Cookie、Host 和 CSRF 请求头被正常转发，并查看 SillyTavern 后端控制台中的对应 403 日志。\n\n> **不要优先关闭 CSRF 防护。** 若报错明确包含 `Invalid CSRF token`，请查看上一条常见问题。',
     }];
-    const CHANGELOG_ITEMS = [{ id: "v1.24.1", version: "v1.24.1", date: "2026-08-24", title: "修复酒馆助手类扩展兼容性", summary: "大型模块化扩展不再被普通热启停逻辑误处理，启用、禁用和更新会按需要无感刷新。", content: "**问题原因：** 酒馆助手类扩展会同时使用模块化脚本、共享事件、jQuery、iframe 和观察器，普通扩展的资源接管可能误判归属，导致入口或功能无法正常适配。\n\n**现在的处理：** 这类扩展会跳过资源暂停和清理，启用、禁用及高风险更新在等待生成结束后重建页面运行时；普通扩展仍保持原来的热更新。若生成一直未结束，可在设置中手动点击“无感刷新”。" }, {
+    const CHANGELOG_ITEMS = [{ id: "v1.24.2", version: "v1.24.2", date: "2026-08-26", title: "修复禁用成功却误报失败和原生页面强制刷新", summary: "扩展状态保存成功后不再被旧缓存误判；从管理器启停扩展后，打开再关闭酒馆原生扩展页也不会被强制刷新。", content: "**误报修复：** 部分酒馆版本保存禁用状态后不会立即重建扩展列表，旧版把这份旧缓存当成操作失败。现在以已成功保存的目标状态为准，缓存读取只用于校准，不再弹出错误。\n\n**刷新修复：** 管理器使用酒馆公开设置直接保存启停状态，并兼容扩展声明的启用或禁用钩子，不再设置酒馆原生扩展页的待刷新标志。旧版本接口不完整时才使用兼容回退。" }, { id: "v1.24.1", version: "v1.24.1", date: "2026-08-24", title: "修复酒馆助手类扩展兼容性", summary: "大型模块化扩展不再被普通热启停逻辑误处理，启用、禁用和更新会按需要无感刷新。", content: "**问题原因：** 酒馆助手类扩展会同时使用模块化脚本、共享事件、jQuery、iframe 和观察器，普通扩展的资源接管可能误判归属，导致入口或功能无法正常适配。\n\n**现在的处理：** 这类扩展会跳过资源暂停和清理，启用、禁用及高风险更新在等待生成结束后重建页面运行时；普通扩展仍保持原来的热更新。若生成一直未结束，可在设置中手动点击“无感刷新”。" }, {
         id: 'v1.24.0', version: 'v1.24.0', date: '2026-08-24', title: '新增按风险选择热更新和无感刷新', summary: '可直接接管的扩展继续热更新；本地模块或热加载失败的扩展自动使用无感刷新安全应用。', content: "**现在的处理：** 单文件、运行时资源可追踪的扩展继续直接热更新；检测到同目录本地模块、Worker 等浏览器缓存风险时，更新后自动带一次性令牌无感刷新页面。若直接热更新失败，也会自动降级到无感刷新。\n\n**刷新后的状态：** 页面启动后会清理令牌并提示扩展状态已重新读取，不需要用户手动点击刷新。",
     }, {
         id: 'v1.23.20', version: 'v1.23.20', date: '2026-08-24', title: '补充禁用残留显示问题说明', summary: '新增禁用后仍有残留显示时的处理方法和反馈渠道。', content: "**常见情况：** 少数扩展无法被热更新完整接管，禁用后可能还会留下旧界面。\n\n**处理方法：** 刷新一次酒馆网页，让插件状态和入口重新加载；如果仍有问题，请到 Discord 对应帖子内 @ 插件作者反馈。",
@@ -753,6 +753,7 @@
     const whitelistState = { scope: 'frontend', selected: new Set(), filter: '', category: '', sort: 'name', statusSortActive: false, selectionMode: false, expandedGroups: { frontend: new Set(), backend: new Set() }, groupPicker: '', groupPickerSelections: new Set(), groupAction: { group: '', phase: '' }, batchAction: '' };
     const detectionResults = { active: false, scope: 'frontend', ids: [], filter: '', sort: 'status', selected: new Set(), selectionMode: false, allowWhitelisted: false, returnPanel: 'installed', title: '检测结果', action: '', message: '' };
     let extensionApiPromise = null;
+    let settingsApiPromise = null;
     let csrfTokenOverride = '';
     let csrfRefreshPromise = null;
 
@@ -928,20 +929,71 @@
         return extensionApiPromise;
     }
 
+    function getSettingsApi() {
+        if (!settingsApiPromise) settingsApiPromise = import("/script.js");
+        return settingsApiPromise;
+    }
+
+    const sameExtensionName = (left, right) => normalizeName(left).toLowerCase() === normalizeName(right).toLowerCase();
+
+    async function callExtensionStateHook(extension, enabled) {
+        const hookName = enabled ? "enable" : "disable";
+        const hookFunctionName = extension.manifest?.hooks?.[hookName];
+        const entry = String(extension.manifest?.js || "").trim();
+        if (typeof hookFunctionName !== "string" || !hookFunctionName || !entry) return;
+        try {
+            const module = await import(extensionFileUrl(extension, entry));
+            const hook = module?.[hookFunctionName];
+            if (typeof hook !== "function") return;
+            let timeoutHandle = 0;
+            const timeout = new Promise(resolve => { timeoutHandle = window.setTimeout(() => resolve("timeout"), 5000); });
+            const result = await Promise.race([Promise.resolve(hook()).then(() => "complete"), timeout]);
+            window.clearTimeout(timeoutHandle);
+            if (result === "timeout") console.warn("[Extension Manager] " + hookName + " hook timed out.", folderOf(extension));
+        } catch (error) {
+            console.warn("[Extension Manager] " + hookName + " hook failed; continuing state change.", folderOf(extension), error);
+        }
+    }
+
     const groupOf = extension => typeOf(extension) === 'system' ? '内置' : (String(extension?.category || '').trim() || '未分组');
 
     async function setExtensionEnabled(extension, enabled, reload = false) {
         const api = await getExtensionApi();
         const action = enabled ? api.enableExtension : api.disableExtension;
-        if (typeof action !== "function") throw new Error("当前酒馆版本不支持扩展启停接口");
         const found = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
         const internalName = found?.name || displayPath(extension);
+        const previousDisabled = Array.isArray(api.extension_settings?.disabledExtensions)
+            ? [...api.extension_settings.disabledExtensions]
+            : null;
+
+        if (reload === false && previousDisabled) {
+            let settingsApi = null;
+            try { settingsApi = await getSettingsApi(); }
+            catch (error) { console.warn("[Extension Manager] Direct settings API unavailable; using native fallback.", error); }
+            if (typeof settingsApi?.saveSettings === "function") {
+                await callExtensionStateHook(extension, enabled);
+                api.extension_settings.disabledExtensions = enabled
+                    ? previousDisabled.filter(name => !sameExtensionName(name, internalName))
+                    : (previousDisabled.some(name => sameExtensionName(name, internalName)) ? previousDisabled : [...previousDisabled, internalName]);
+                try {
+                    await settingsApi.saveSettings();
+                } catch (error) {
+                    api.extension_settings.disabledExtensions = previousDisabled;
+                    throw new Error("保存扩展" + (enabled ? "启用" : "禁用") + "状态失败：" + (error.message || error));
+                }
+                extension.enabled = enabled;
+                return api.findExtension?.(internalName) || { name: internalName, enabled };
+            }
+        }
+
+        if (typeof action !== "function") throw new Error("当前酒馆版本不支持扩展启停接口");
         await action(internalName, reload);
         const current = api.findExtension?.(internalName) || api.findExtension?.(folderOf(extension));
-        if (!current) throw new Error("酒馆未能重新读取扩展启停状态");
-        extension.enabled = current.enabled === true;
-        if (extension.enabled !== enabled) throw new Error("酒馆返回的扩展状态与操作不一致");
-        return current;
+        extension.enabled = enabled;
+        if (current && current.enabled !== enabled) {
+            console.warn("[Extension Manager] Ignoring stale extension state returned after a successful toggle.", internalName, current.enabled, enabled);
+        }
+        return { ...(current || {}), name: current?.name || internalName, enabled };
     }
 
     function normalizeMeta(value) {
@@ -2892,7 +2944,7 @@
     async function toggleExtensionHot(extension, enabled) {
         const mode = extensionHotToggleMode(extension);
         const folder = folderOf(extension);
-        await setExtensionEnabled(extension, enabled, false);
+        const savedState = await setExtensionEnabled(extension, enabled, false);
 
         if (isTavernHelperExtension(extension)) {
             const ready = await waitForGenerationIdle();
@@ -2935,9 +2987,11 @@
         await nextPaint();
         const api = await getExtensionApi();
         const current = api.findExtension?.(displayPath(extension)) || api.findExtension?.(folderOf(extension));
-        if (!current || current.enabled !== enabled) throw new Error('扩展状态复核失败');
-        extension.enabled = current.enabled;
-        return { ...current, hot: true, mode, resources: extensionHotRuntime.stats(folder) };
+        if (current && current.enabled !== enabled) {
+            console.warn("[Extension Manager] Extension state cache is stale after hot toggle; keeping the saved state.", folder, current.enabled, enabled);
+        }
+        extension.enabled = enabled;
+        return { ...savedState, enabled, hot: true, mode, resources: extensionHotRuntime.stats(folder) };
     }
 
     async function updateOne(extension, $popup, options = {}) {
